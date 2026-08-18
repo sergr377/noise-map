@@ -174,9 +174,15 @@ export default function App() {
 
         <div className="legend">
           <h2>Уровень, дБ(A)</h2>
+          {/* Bands missing from a result are dimmed, but only once a result
+              exists — before the first calculation nothing is "absent", and
+              dimming the whole scale then just makes the legend look broken. */}
           <ul>
             {[...BANDS].reverse().map((band) => (
-              <li key={band.level} className={presentLevels.has(band.level) ? '' : 'absent'}>
+              <li
+                key={band.level}
+                className={!data || presentLevels.has(band.level) ? '' : 'absent'}
+              >
                 <span className="swatch" style={{ background: band.color }} aria-hidden="true" />
                 <span className="range">{band.label}</span>
               </li>
