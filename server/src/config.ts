@@ -36,6 +36,20 @@ export const GEOCODER_KEY = process.env.YANDEX_GEOCODER_KEY ?? '';
 export const MAX_CONCURRENT_JOBS = Number(process.env.MAX_CONCURRENT_JOBS ?? 1);
 
 export const CACHE_DIR = path.join(ROOT, 'cache');
+
+/**
+ * Built frontend. When present the API also serves it, so a deployment is one
+ * process instead of an API plus a separate static host. In development Vite
+ * serves the frontend and proxies /api here, and this directory does not exist.
+ */
+export const WEB_DIST = path.join(ROOT, 'dist-web');
+
+/**
+ * Refuse to compute on demand. A cold job needs ~1.8 GB of heap and several
+ * minutes of every core; on a small host that is a denial of service waiting to
+ * happen. With this set the API still serves anything already in the cache.
+ */
+export const CACHE_ONLY = process.env.CACHE_ONLY === '1';
 export const RUN_JOB_SCRIPT = path.join(ROOT, 'scripts', 'run-job.mjs');
 
 /**

@@ -1,7 +1,10 @@
 import http from 'node:http';
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import path from 'node:path';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
-import { PORT, STAGE_LABELS } from './config.js';
+import { CACHE_ONLY, PORT, STAGE_LABELS, WEB_DIST } from './config.js';
 import { cacheKey, quantize, readCache, cacheSize } from './cache.js';
 import { startJob, getJob, subscribe, snapshot } from './queue.js';
 import { geocode, GeocoderError } from './geocode.js';
@@ -49,6 +52,14 @@ async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse)
   const bytes = await cacheSize(id);
   if (bytes !== null) {
     return sendJson(res, 200, { id, cached: true, bytes, centre });
+  }
+
+  if (CACHE_ONLY) {
+    return sendJson(res, 503, {
+      error:
+        'здесь показаны только заранее посчитанные места — расчёт нового требует нескольких минут на всех ядрах',
+      cacheOnly: true,
+    });
   }
 
   const job = startJob(lat, lon);
@@ -149,6 +160,55 @@ async function handleGeocode(res: http.ServerResponse, query: string) {
   }
 }
 
+const CONTENT_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.json': 'application/json; charset=utf-8',
+  '.ico': 'image/x-icon',
+};
+
+/**
+ * Serves the built frontend when it exists. Unknown paths fall back to
+ * index.html so that a deep link like /?lat=..&lon=.. survives a page reload.
+ */
+async function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathname: string) {
+  // decodeURIComponent matters: %2e%2e%2f survives URL normalisation and would
+  // otherwise reach the filesystem as ../ after any later decoding.
+  let relative: string;
+  try {
+    relative = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
+  } catch {
+    return sendJson(res, 400, { error: 'bad path' });
+  }
+
+  let file = path.resolve(WEB_DIST, relative);
+  // startsWith would also accept a sibling directory whose name merely begins
+  // with the root's; comparing the relative path is the reliable form.
+  const inside = path.relative(WEB_DIST, file);
+  if (inside.startsWith('..') || path.isAbsolute(inside)) {
+    return sendJson(res, 403, { error: 'forbidden' });
+  }
+
+  let info = await stat(file).catch(() => null);
+  if (!info?.isFile()) {
+    file = path.join(WEB_DIST, 'index.html');
+    info = await stat(file).catch(() => null);
+    if (!info?.isFile()) return sendJson(res, 404, { error: 'not found' });
+  }
+
+  const ext = path.extname(file).toLowerCase();
+  res.writeHead(200, {
+    'Content-Type': CONTENT_TYPES[ext] ?? 'application/octet-stream',
+    'Content-Length': info.size,
+    // Vite fingerprints asset filenames, so only the entry page must stay fresh.
+    'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+  });
+  createReadStream(file).pipe(res);
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -171,6 +231,10 @@ const server = http.createServer(async (req, res) => {
     if (match && req.method === 'GET') {
       const [, id, kind] = match as unknown as [string, string, string];
       return kind === 'events' ? handleEvents(res, id) : await handleResult(req, res, id);
+    }
+
+    if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
+      return await serveStatic(req, res, url.pathname);
     }
 
     return sendJson(res, 404, { error: 'not found' });

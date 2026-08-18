@@ -1,0 +1,12 @@
+node_modules
+dist-web
+server/dist
+.tools
+jobs
+cache
+.git
+.env
+.env.*
+!.env.example
+docs
+README.md
