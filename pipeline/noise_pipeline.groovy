@@ -17,8 +17,11 @@ import org.noise_planet.noisemodelling.scripts.Acoustic_Tools.Create_Isosurface
 import org.noise_planet.noisemodelling.scripts.Geometric_Tools.Change_SRID
 import org.noise_planet.noisemodelling.scripts.Import_and_Export.Export_Table
 import org.noise_planet.noisemodelling.scripts.Import_and_Export.Import_Asc_File
+import org.noise_planet.noisemodelling.scripts.Import_and_Export.Import_File
 import org.noise_planet.noisemodelling.scripts.Import_and_Export.Import_OSM
+import org.noise_planet.noisemodelling.scripts.NoiseModelling.Noise_level_from_source
 import org.noise_planet.noisemodelling.scripts.NoiseModelling.Noise_level_from_traffic
+import org.noise_planet.noisemodelling.scripts.NoiseModelling.Railway_Emission_from_Traffic
 import org.noise_planet.noisemodelling.scripts.Receivers.Delaunay_Grid
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -43,6 +46,8 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
     }
     def p = new JsonSlurper().parse(new File(paramsPath))
     logger.info('pipeline params: {}', p)
+
+    Sql sql = new Sql(connection)
 
     // Only the two heavy blocks take a ProgressVisitor overload; the rest are
     // exec(Connection, input) and would throw MissingMethodException on 3 args.
@@ -113,6 +118,103 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
     stamp('Noise_level_from_traffic')
     logger.info('levels table: {}', res.result)
 
+    // 3b. Optional railway contribution — UNFINISHED, see the README.
+    //     The emission step below works; the propagation pass after it does not
+    //     complete in reasonable time, so this branch is off by default and is
+    //     not exposed through the HTTP layer.
+    //
+    //     Rail runs as a second propagation pass rather than as extra sources in
+    //     the first: the road path is the proven one, and keeping it untouched
+    //     means enabling rail cannot change a road-only result. The two passes
+    //     are then summed energetically, which is how independent sources
+    //     combine — arithmetic averaging of decibels would be meaningless.
+    if (p.railFile != null && !(p.railFile as String).isEmpty()) {
+        new Import_File().exec(connection, [
+                pathFile : p.railFile as String,
+                inputSRID: 4326,
+                tableName: 'RAIL_IMPORT'
+        ])
+        new Change_SRID().exec(connection, [tableName: 'RAIL_IMPORT', newSRID: p.srid as Integer])
+
+        sql.execute('DROP TABLE IF EXISTS RAIL_SECTIONS')
+        sql.execute('''
+            CREATE TABLE RAIL_SECTIONS AS
+            SELECT CAST(ROW_NUMBER() OVER () AS INTEGER) AS IDSECTION,
+                   THE_GEOM, NTRACK, TRACKSPD, TRANSFER, ROUGHNESS,
+                   IMPACT, CURVATURE, BRIDGE, ISTUNNEL
+            FROM RAIL_IMPORT
+        ''')
+        // CREATE TABLE AS SELECT leaves columns nullable in H2, and a primary
+        // key will not accept that.
+        sql.execute('ALTER TABLE RAIL_SECTIONS ALTER COLUMN IDSECTION SET NOT NULL')
+        sql.execute('ALTER TABLE RAIL_SECTIONS ADD PRIMARY KEY (IDSECTION)')
+
+        // Train counts come from the caller: OpenStreetMap carries no timetable,
+        // and unlike roads there is no official default table to fall back on.
+        sql.execute('DROP TABLE IF EXISTS RAIL_TRAFFIC')
+        sql.execute("""
+            CREATE TABLE RAIL_TRAFFIC AS
+            SELECT IDSECTION AS IDTRAFFIC, IDSECTION,
+                   '${p.trainType}' AS TRAINTYPE,
+                   TRACKSPD AS TRAINSPD,
+                   ${p.trainsDay as Integer} AS TDAY,
+                   ${p.trainsEvening as Integer} AS TEVENING,
+                   ${p.trainsNight as Integer} AS TNIGHT
+            FROM RAIL_SECTIONS
+        """ as String)
+        sql.execute('ALTER TABLE RAIL_TRAFFIC ALTER COLUMN IDTRAFFIC SET NOT NULL')
+        sql.execute('ALTER TABLE RAIL_TRAFFIC ADD PRIMARY KEY (IDTRAFFIC)')
+
+        def sections = sql.firstRow('SELECT COUNT(*) AS n FROM RAIL_SECTIONS').n
+        logger.info('[RAIL] {} sections, {} trains/h day', sections, p.trainsDay)
+
+        new Railway_Emission_from_Traffic().exec(connection, [
+                tableRailwayTraffic: 'RAIL_TRAFFIC',
+                tableRailwayTrack  : 'RAIL_SECTIONS'
+        ])
+        stamp('Railway_Emission_from_Traffic')
+
+        sql.execute('DROP TABLE IF EXISTS ROAD_LEVEL')
+        sql.execute('ALTER TABLE RECEIVERS_LEVEL RENAME TO ROAD_LEVEL')
+
+        // LW_RAILWAY is self-contained: Railway_Emission_from_Traffic writes
+        // geometry alongside third-octave levels per period (HZD*/HZE*/HZN*), so
+        // it goes in as the sources table rather than as a separate emission one.
+        new Noise_level_from_source().exec(connection, [
+                tableBuilding         : 'BUILDINGS',
+                tableSources          : 'LW_RAILWAY',
+                tableReceivers        : 'RECEIVERS',
+                tableGroundAbs        : 'GROUND',
+                confMaxSrcDist        : p.maxSrcDist as Double,
+                confDiffVertical      : p.diffVertical as Boolean,
+                confDiffHorizontal    : p.diffHorizontal as Boolean,
+                confReflOrder         : p.reflOrder as Integer,
+                confThreadNumber      : 0
+        ], pv)
+        stamp('Noise_level_from_source (rail)')
+
+        sql.execute('DROP TABLE IF EXISTS RAIL_LEVEL')
+        sql.execute('ALTER TABLE RECEIVERS_LEVEL RENAME TO RAIL_LEVEL')
+
+        // Energetic sum, band by band. Road is the base: it covers every
+        // receiver, while a receiver out of range of any track has no rail row.
+        def bands = ['HZ63', 'HZ125', 'HZ250', 'HZ500', 'HZ1000', 'HZ2000', 'HZ4000', 'HZ8000', 'LAEQ', 'LEQ']
+        def sums = bands.collect { band ->
+            "10 * LOG10(POWER(10, r.${band} / 10) + POWER(10, COALESCE(t.${band}, -99) / 10)) AS ${band}"
+        }.join(',\n                   ')
+
+        sql.execute('DROP TABLE IF EXISTS RECEIVERS_LEVEL')
+        sql.execute("""
+            CREATE TABLE RECEIVERS_LEVEL AS
+            SELECT r.IDRECEIVER, r.PERIOD, r.THE_GEOM,
+                   ${sums}
+            FROM ROAD_LEVEL r
+            LEFT JOIN RAIL_LEVEL t
+              ON r.IDRECEIVER = t.IDRECEIVER AND r.PERIOD = t.PERIOD
+        """ as String)
+        stamp('Combine road + rail')
+    }
+
     // 4. Isosurfaces. Bands follow the NF S31-133 / END convention.
     new Create_Isosurface().exec(connection, [
             resultTable     : 'RECEIVERS_LEVEL',
@@ -130,7 +232,6 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
     //    ST_Buffer(geom, 0) repairs self-intersections that would otherwise make
     //    ST_Union throw; simplification runs here, while coordinates are still in
     //    metres, so the tolerance is a real distance rather than a degree fraction.
-    Sql sql = new Sql(connection)
     sql.execute('DROP TABLE IF EXISTS CONTOURING_DISSOLVED')
     sql.execute("""
         CREATE TABLE CONTOURING_DISSOLVED AS

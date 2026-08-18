@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { bboxAround, bboxEwkt, utmSrid, fetchOsm } from './lib.mjs';
 import { writeDemAsc } from './dem.mjs';
+import { fetchRail, NIGHT_SHARE, TRAIN_TYPE } from './rail.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NM_HOME = path.join(ROOT, '.tools', 'nm', 'NoiseModelling_6.0.0');
@@ -34,6 +35,10 @@ function parseArgs(argv) {
     coordDecimals: 6,
     dem: 1,
     demCellsize: 0.00025,
+    // Railways are opt-in: their traffic is supplied by the caller rather than
+    // derived from data, so they are never switched on silently.
+    rail: 0,
+    trainsPerHour: 4,
   };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].replace(/^--/, '');
@@ -141,6 +146,24 @@ if (args.dem) {
   }
 }
 
+const railFile = path.join(jobDir, 'rail.geojson');
+let railInfo = null;
+if (args.rail) {
+  const cachedRail = await stat(railFile).catch(() => null);
+  if (cachedRail && cachedRail.size > 0) {
+    console.log('  rail: reusing cached geometry');
+    railInfo = { cached: true };
+  } else {
+    railInfo = await fetchRail(bbox, railFile);
+    console.log(
+      `  rail: ${railInfo.sections} участков пути, скорость из OSM у ${railInfo.speedFromOsm}`,
+    );
+    if (railInfo.sections === 0) {
+      console.log('  rail: поверхностных путей нет — слой не даст вклада');
+    }
+  }
+}
+
 const tOsm = Date.now();
 emit('STAGE', 'import');
 
@@ -162,6 +185,13 @@ await writeFile(
       srid,
       fenceWkt,
       demFile: demInfo ? demFile : '',
+      // An empty geometry file would make the rail pass do a full propagation
+      // run for nothing, so a location without surface track skips it entirely.
+      railFile: railInfo && railInfo.sections !== 0 ? railFile : '',
+      trainType: TRAIN_TYPE,
+      trainsDay: args.trainsPerHour,
+      trainsEvening: args.trainsPerHour,
+      trainsNight: Math.max(0, Math.round(args.trainsPerHour * NIGHT_SHARE)),
       maxArea: args.maxArea,
       maxSrcDist: args.maxSrcDist,
       simplifyTolerance: args.simplifyTolerance,
