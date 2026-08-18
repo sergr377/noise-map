@@ -24,7 +24,7 @@ function bandMid(label) {
   return (a + b) / 2;
 }
 
-function centroid(geom) {
+function centroid(coords) {
   let sx = 0;
   let sy = 0;
   let n = 0;
@@ -35,14 +35,27 @@ function centroid(geom) {
       n += 1;
     } else c.forEach(walk);
   };
-  walk(geom.coordinates);
+  walk(coords);
   return [sx / n, sy / n];
 }
 
-const items = feats.map((f) => ({
-  level: bandMid(f.properties.ISOLABEL),
-  c: centroid(f.geometry),
-}));
+/**
+ * After the dissolve step a whole noise band arrives as one MultiPolygon whose
+ * parts are scattered across the map, and its overall centroid would sit
+ * somewhere in between them — meaningless for a distance test. Measure per part.
+ */
+function parts(geom) {
+  if (geom.type === 'MultiPolygon') return geom.coordinates;
+  if (geom.type === 'Polygon') return [geom.coordinates];
+  return [];
+}
+
+const items = feats.flatMap((f) =>
+  parts(f.geometry).map((poly) => ({
+    level: bandMid(f.properties.ISOLABEL),
+    c: centroid(poly),
+  })),
+);
 
 const latRef = items[0].c[1];
 const mPerDegLat = 111320;

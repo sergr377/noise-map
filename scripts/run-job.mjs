@@ -6,7 +6,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdir, writeFile, stat, rm, readdir } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, stat, rm, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { bboxAround, bboxEwkt, utmSrid, fetchOsm } from './lib.mjs';
@@ -22,6 +22,8 @@ function parseArgs(argv) {
     diffVertical: 1,
     diffHorizontal: 0,
     reflOrder: 1,
+    simplifyTolerance: 1.0,
+    coordDecimals: 6,
   };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].replace(/^--/, '');
@@ -114,6 +116,7 @@ await writeFile(
       fenceWkt,
       maxArea: args.maxArea,
       maxSrcDist: args.maxSrcDist,
+      simplifyTolerance: args.simplifyTolerance,
       diffVertical: Boolean(args.diffVertical),
       diffHorizontal: Boolean(args.diffHorizontal),
       reflOrder: args.reflOrder,
@@ -128,7 +131,32 @@ await writeFile(
 await runScriptRunner(jobDir, paramsPath);
 const tNm = Date.now();
 
-const { size } = await stat(outFile);
 console.log(`  noisemodelling: ${((tNm - tOsm) / 1000).toFixed(1)}s`);
-console.log(`  output: ${(size / 1024).toFixed(0)} KB -> ${outFile}`);
-console.log(`TOTAL ${((tNm - t0) / 1000).toFixed(1)}s`);
+
+// The exporter writes full double precision — 14 decimal places, i.e. nanometres.
+// Six decimals is ~0.1 m at this latitude, far finer than the model's accuracy,
+// and drops roughly half the bytes on its own.
+const rawSize = (await stat(outFile)).size;
+const gj = JSON.parse(await readFile(outFile, 'utf8'));
+const factor = 10 ** args.coordDecimals;
+const roundCoords = (c) => {
+  if (typeof c[0] === 'number') {
+    c[0] = Math.round(c[0] * factor) / factor;
+    c[1] = Math.round(c[1] * factor) / factor;
+    if (c.length > 2) c.length = 2;
+  } else {
+    c.forEach(roundCoords);
+  }
+};
+for (const feat of gj.features) {
+  if (feat.geometry) roundCoords(feat.geometry.coordinates);
+}
+await writeFile(outFile, JSON.stringify(gj), 'utf8');
+const finalSize = (await stat(outFile)).size;
+
+console.log(
+  `  output: ${(rawSize / 1024).toFixed(0)} KB -> ${(finalSize / 1024).toFixed(0)} KB ` +
+    `after rounding (${gj.features.length} features)`,
+);
+console.log(`  ${outFile}`);
+console.log(`TOTAL ${((Date.now() - t0) / 1000).toFixed(1)}s`);

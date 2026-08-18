@@ -11,6 +11,7 @@
  */
 
 import groovy.json.JsonSlurper
+import groovy.sql.Sql
 import org.h2gis.api.ProgressVisitor
 import org.noise_planet.noisemodelling.scripts.Acoustic_Tools.Create_Isosurface
 import org.noise_planet.noisemodelling.scripts.Geometric_Tools.Change_SRID
@@ -102,15 +103,41 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
     ], pv)
     stamp('Create_Isosurface')
 
-    // 5. Reproject to WGS84 — the metric SRID is a calculation detail, web maps want 4326.
+    // 5. Dissolve. Create_Isosurface emits one polygon per Delaunay cell, so a
+    //    single noise band arrives as hundreds of adjacent fragments that share
+    //    edges. Merging them per (period, level) collapses that into a handful of
+    //    multipolygons and removes all the interior seams.
+    //
+    //    ST_Buffer(geom, 0) repairs self-intersections that would otherwise make
+    //    ST_Union throw; simplification runs here, while coordinates are still in
+    //    metres, so the tolerance is a real distance rather than a degree fraction.
+    Sql sql = new Sql(connection)
+    sql.execute('DROP TABLE IF EXISTS CONTOURING_DISSOLVED')
+    sql.execute("""
+        CREATE TABLE CONTOURING_DISSOLVED AS
+        SELECT ST_SIMPLIFYPRESERVETOPOLOGY(
+                   ST_UNION(ST_ACCUM(ST_BUFFER(THE_GEOM, 0))),
+                   ${p.simplifyTolerance as Double}
+               ) AS THE_GEOM,
+               PERIOD, ISOLVL, ISOLABEL
+        FROM CONTOURING_NOISE_MAP
+        GROUP BY PERIOD, ISOLVL, ISOLABEL
+    """ as String)
+
+    def before = sql.firstRow('SELECT COUNT(*) AS n FROM CONTOURING_NOISE_MAP').n
+    def after = sql.firstRow('SELECT COUNT(*) AS n FROM CONTOURING_DISSOLVED').n
+    logger.info('[DISSOLVE] {} polygons -> {} multipolygons', before, after)
+    stamp('Dissolve')
+
+    // 6. Reproject to WGS84 — the metric SRID is a calculation detail, web maps want 4326.
     new Change_SRID().exec(connection, [
-            tableName: 'CONTOURING_NOISE_MAP',
+            tableName: 'CONTOURING_DISSOLVED',
             newSRID  : 4326
     ])
     stamp('Change_SRID')
 
     new Export_Table().exec(connection, [
-            tableToExport: 'CONTOURING_NOISE_MAP',
+            tableToExport: 'CONTOURING_DISSOLVED',
             exportPath   : p.outFile as String
     ])
     stamp('Export_Table')
