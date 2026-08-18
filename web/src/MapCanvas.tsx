@@ -7,14 +7,18 @@ interface Props {
   /** The bootstrapped map module. Mounted only once it has loaded, so that the
    *  hooks below are never called conditionally. */
   maps: typeof Ymaps;
-  /** Where the viewport opens. Read once — the map owns its camera afterwards. */
-  initialLocation: { center: [number, number]; zoom: number };
+  /**
+   * Viewport. The map owns its camera between updates — this only moves it when
+   * the value itself changes, i.e. on a deep link or an address search, never on
+   * an ordinary map click.
+   */
+  location: { center: [number, number]; zoom: number };
   features: IsophoneCollection['features'];
   centre: Centre | null;
   onPick: (lat: number, lon: number) => void;
 }
 
-export default function MapCanvas({ maps, initialLocation, features, centre, onPick }: Props) {
+export default function MapCanvas({ maps, location: requested, features, centre, onPick }: Props) {
   const {
     reactify,
     YMap,
@@ -25,9 +29,10 @@ export default function MapCanvas({ maps, initialLocation, features, centre, onP
     YMapMarker,
   } = maps;
 
-  // Uncontrolled: the map owns its viewport afterwards, so panning and zooming
-  // are not fought by re-renders.
-  const location = reactify.useDefault(initialLocation);
+  // Uncontrolled between updates: passing the value as its own dependency means
+  // the camera moves when we deliberately change it, and re-renders otherwise
+  // leave the user's panning and zooming alone.
+  const location = reactify.useDefault(requested, [requested]);
 
   const handleClick = (_object: unknown, event: { coordinates: LngLat }) => {
     const [lon, lat] = event.coordinates;

@@ -153,10 +153,14 @@ function runPipeline(job: Job): Promise<void> {
           setStage(job, 'error');
         }
       } else {
+        // The raw tail is a Java stack trace — useful in the log, meaningless to
+        // whoever clicked the map. The usual cause is a spot with no roads in
+        // OpenStreetMap, so say that and keep the detail server-side.
+        console.error(
+          `job ${job.id} at ${job.lat},${job.lon} failed (code ${code}):\n${stderrTail.join('\n')}`,
+        );
         job.error =
-          code === 0
-            ? 'pipeline finished without producing a result'
-            : `pipeline exited with code ${code}: ${stderrTail.slice(-6).join(' | ').slice(0, 500)}`;
+          'не удалось рассчитать — возможно, поблизости нет дорог в OpenStreetMap';
         setStage(job, 'error');
       }
       resolve();

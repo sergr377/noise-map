@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import type * as Ymaps from './ymaps';
 import MapCanvas from './MapCanvas';
 import { BANDS } from './palette';
 import {
   fetchResult,
   followJob,
+  geocode,
   requestNoise,
   type Centre,
   type IsophoneCollection,
   type JobState,
   type Period,
+  type Place,
 } from './api';
 
 const DEFAULT_CENTER: [number, number] = [37.6173, 55.7558];
@@ -21,8 +23,15 @@ const DEFAULT_CENTER: [number, number] = [37.6173, 55.7558];
  */
 function readLocationFromUrl(): { lat: number; lon: number } | null {
   const params = new URLSearchParams(window.location.search);
-  const lat = Number(params.get('lat'));
-  const lon = Number(params.get('lon'));
+  const rawLat = params.get('lat');
+  const rawLon = params.get('lon');
+  // Presence has to be checked before conversion: Number(null) and Number('')
+  // are both 0, which is a real coordinate — the Gulf of Guinea — so a plain
+  // URL would silently deep-link into the ocean.
+  if (!rawLat || !rawLon) return null;
+
+  const lat = Number(rawLat);
+  const lon = Number(rawLon);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
   if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
   return { lat, lon };
@@ -74,15 +83,17 @@ export default function App() {
   const [fromCache, setFromCache] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [query, setQuery] = useState('');
+  const [places, setPlaces] = useState<Place[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
   // Read once: later picks rewrite the URL, and re-reading it would loop.
   const [deepLink] = useState(readLocationFromUrl);
-  const initialLocation = useMemo(
-    () => ({
-      center: deepLink ? ([deepLink.lon, deepLink.lat] as [number, number]) : DEFAULT_CENTER,
-      zoom: 15,
-    }),
-    [deepLink],
-  );
+  const [location, setLocation] = useState(() => ({
+    center: deepLink ? ([deepLink.lon, deepLink.lat] as [number, number]) : DEFAULT_CENTER,
+    zoom: 15,
+  }));
 
   useEffect(() => {
     let cancelled = false;
@@ -125,6 +136,35 @@ export default function App() {
     }
   }, []);
 
+  const handleSearch = useCallback(
+    async (event: FormEvent) => {
+      event.preventDefault();
+      const trimmed = query.trim();
+      if (trimmed.length < 3) return;
+      setSearching(true);
+      setSearchError(null);
+      setPlaces(null);
+      try {
+        setPlaces(await geocode(trimmed));
+      } catch (err) {
+        setSearchError((err as Error).message);
+      } finally {
+        setSearching(false);
+      }
+    },
+    [query],
+  );
+
+  const handleSelect = useCallback(
+    (place: Place) => {
+      setPlaces(null);
+      setQuery(place.name);
+      setLocation({ center: [place.lon, place.lat], zoom: 16 });
+      void handlePick(place.lat, place.lon);
+    },
+    [handlePick],
+  );
+
   // Kick off the deep-linked calculation once the map module is in place, so the
   // marker and isophones land on a map that already exists.
   useEffect(() => {
@@ -145,7 +185,7 @@ export default function App() {
       {maps ? (
         <MapCanvas
           maps={maps}
-          initialLocation={initialLocation}
+          location={location}
           features={visible}
           centre={centre}
           onPick={handlePick}
@@ -173,9 +213,39 @@ export default function App() {
       <div className="panel">
         <h1>Карта шума</h1>
         <p className="lead">
-          Кликните по карте — рассчитаем уровень шума от автотранспорта в радиусе 500 м по
-          методу CNOSSOS-EU.
+          Найдите адрес или кликните по карте — рассчитаем уровень шума от автотранспорта
+          в радиусе 500 м по методу CNOSSOS-EU.
         </p>
+
+        <form className="search" onSubmit={handleSearch}>
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Москва, Тверская улица, 12"
+            aria-label="Адрес"
+          />
+          <button type="submit" disabled={searching || query.trim().length < 3}>
+            {searching ? '…' : 'Найти'}
+          </button>
+        </form>
+
+        {searchError && <p className="error">Поиск не сработал: {searchError}</p>}
+
+        {places?.length === 0 && <p className="note">Ничего не нашлось. Уточните адрес.</p>}
+
+        {places && places.length > 0 && (
+          <ul className="results">
+            {places.map((place) => (
+              <li key={`${place.lat},${place.lon}`}>
+                <button type="button" onClick={() => handleSelect(place)}>
+                  <span className="result-name">{place.name}</span>
+                  <span className="result-description">{place.description}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
 
         <div className="periods" role="group" aria-label="Период суток">
           {PERIODS.map((p) => (

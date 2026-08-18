@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { PORT, STAGE_LABELS } from './config.js';
 import { cacheKey, quantize, readCache, cacheSize } from './cache.js';
 import { startJob, getJob, subscribe, snapshot } from './queue.js';
+import { geocode, GeocoderError } from './geocode.js';
 
 const gzipAsync = promisify(gzip);
 
@@ -69,21 +70,39 @@ function handleEvents(res: http.ServerResponse, id: string) {
     ...CORS,
   });
 
-  const unsubscribe = subscribe(job, (state) => {
-    res.write(`data: ${JSON.stringify(state)}\n\n`);
-    if (state.stage === 'done' || state.stage === 'error') {
-      unsubscribe();
-      clearInterval(heartbeat);
-      res.end();
-    }
-  });
-
+  // subscribe() invokes the listener synchronously with the current state. For a
+  // job that has already finished that happens *during* the call below, before
+  // its own result is bound — so nothing the listener touches may be declared
+  // after it. Both the interval and the release hook are therefore hoisted, and
+  // the subscription is released again once the handle exists.
+  //
   // Proxies drop idle connections; a comment line keeps this one alive without
   // being mistaken for an event.
-  const heartbeat = setInterval(() => res.write(': ping\n\n'), 15_000);
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(': ping\n\n');
+  }, 15_000);
+
+  let unsubscribe: (() => void) | undefined;
+  let finished = false;
+
+  const close = () => {
+    finished = true;
+    unsubscribe?.();
+    clearInterval(heartbeat);
+    if (!res.writableEnded) res.end();
+  };
+
+  unsubscribe = subscribe(job, (state) => {
+    if (res.writableEnded) return;
+    res.write(`data: ${JSON.stringify(state)}\n\n`);
+    if (state.stage === 'done' || state.stage === 'error') close();
+  });
+
+  // The listener already fired and closed the stream; drop the now-known handle.
+  if (finished) unsubscribe();
 
   res.on('close', () => {
-    unsubscribe();
+    unsubscribe?.();
     clearInterval(heartbeat);
   });
 }
@@ -114,6 +133,22 @@ async function handleResult(req: http.IncomingMessage, res: http.ServerResponse,
   return res.end(data);
 }
 
+/** GET /api/geocode?q= — address lookup, proxied so the key stays server-side. */
+async function handleGeocode(res: http.ServerResponse, query: string) {
+  const trimmed = query.trim();
+  if (trimmed.length < 3) {
+    return sendJson(res, 400, { error: 'запрос слишком короткий' });
+  }
+  try {
+    return sendJson(res, 200, { places: await geocode(trimmed) });
+  } catch (err) {
+    if (err instanceof GeocoderError) {
+      return sendJson(res, err.status, { error: err.message });
+    }
+    return sendJson(res, 502, { error: `геокодер недоступен: ${(err as Error).message}` });
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -128,6 +163,9 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/noise' && req.method === 'POST') {
       return await handleCreate(req, res);
     }
+    if (url.pathname === '/api/geocode' && req.method === 'GET') {
+      return await handleGeocode(res, url.searchParams.get('q') ?? '');
+    }
 
     const match = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/(events|result)$/);
     if (match && req.method === 'GET') {
@@ -137,6 +175,12 @@ const server = http.createServer(async (req, res) => {
 
     return sendJson(res, 404, { error: 'not found' });
   } catch (err) {
+    // Once headers are out — an SSE stream, say — writing an error response
+    // throws a second time and kills the process. Drop the socket instead.
+    if (res.headersSent) {
+      console.error('error after headers were sent:', err);
+      return res.destroy();
+    }
     return sendJson(res, 500, { error: (err as Error).message });
   }
 });

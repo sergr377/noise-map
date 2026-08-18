@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
 /** Repository root: this file lives two levels down, both in src/ and in dist/. */
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -11,7 +12,22 @@ try {
   /* no .env present */
 }
 
+// Node's fetch ignores HTTP(S)_PROXY, unlike curl or PowerShell. On a machine
+// behind a proxy an unreachable host looks like a dead service instead, so
+// honour the env vars explicitly — same reason as in scripts/lib.mjs.
+const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+if (proxyUrl) {
+  setGlobalDispatcher(new ProxyAgent(proxyUrl));
+}
+
 export const PORT = Number(process.env.PORT ?? 8787);
+
+/**
+ * Geocoder key. Deliberately server-side: unlike the JS API key it carries no
+ * HTTP Referer restriction, so anyone could lift it out of a browser bundle and
+ * spend the quota. The frontend talks to /api/geocode instead.
+ */
+export const GEOCODER_KEY = process.env.YANDEX_GEOCODER_KEY ?? '';
 
 /**
  * The propagation step already saturates every core, so running two jobs at once

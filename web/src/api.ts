@@ -53,6 +53,15 @@ export interface IsophoneCollection {
   }>;
 }
 
+export interface Place {
+  name: string;
+  description: string;
+  lat: number;
+  lon: number;
+  /** Geocoder confidence: exact | number | near | street | other. */
+  precision: string;
+}
+
 async function asJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}) as { error?: string });
@@ -69,6 +78,17 @@ export async function requestNoise(lat: number, lon: number): Promise<CreateResp
       body: JSON.stringify({ lat, lon }),
     }),
   );
+}
+
+/**
+ * Address lookup. Proxied through our own server: the geocoder key has no
+ * referer restriction, so it must never reach the browser.
+ */
+export async function geocode(query: string): Promise<Place[]> {
+  const { places } = await asJson<{ places: Place[] }>(
+    await fetch(`/api/geocode?q=${encodeURIComponent(query)}`),
+  );
+  return places;
 }
 
 export async function fetchResult(id: string): Promise<IsophoneCollection> {
