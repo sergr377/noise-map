@@ -6,3 +6,11 @@ dist/
 
 # Per-run job directories: OSM extracts, H2 database files, output GeoJSON
 jobs/
+
+# Cached results served by the API
+cache/
+
+# Secrets: API keys live here, never in git. .env.example holds the template.
+.env
+.env.*
+!.env.example

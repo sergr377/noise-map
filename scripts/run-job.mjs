@@ -14,6 +14,13 @@ import { bboxAround, bboxEwkt, utmSrid, fetchOsm } from './lib.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NM_HOME = path.join(ROOT, '.tools', 'nm', 'NoiseModelling_6.0.0');
 
+/**
+ * Machine-readable markers on stdout. The HTTP layer spawns this script rather
+ * than reimplementing the pipeline, and parses these lines to drive its progress
+ * stream. The `@@` prefix cannot collide with NoiseModelling's own log format.
+ */
+const emit = (kind, payload) => console.log(`@@${kind} ${payload}`);
+
 function parseArgs(argv) {
   const out = {
     radius: 1000,
@@ -44,11 +51,28 @@ function runScriptRunner(jobDir, paramsPath) {
       env: { ...process.env, NM_PARAMS: paramsPath },
       shell: true,
     });
+    // Which stage begins once a given block reports completion.
+    const nextStage = {
+      Import_OSM: 'grid',
+      Delaunay_Grid: 'propagation',
+      Noise_level_from_traffic: 'isosurface',
+      Create_Isosurface: 'dissolve',
+      Dissolve: 'export',
+    };
     let tail = [];
     const capture = (buf) => {
       const text = buf.toString();
       for (const line of text.split(/\r?\n/)) {
         if (!line.trim()) continue;
+
+        const done = line.match(/\[TIMING\] (\w+) done/);
+        if (done && nextStage[done[1]]) emit('STAGE', nextStage[done[1]]);
+
+        // Propagation is ~90% of the runtime and NoiseModelling reports it as
+        // cells, which is the only real progress signal the pipeline exposes.
+        const cell = line.match(/Begin processing of cell (\d+)\/(\d+)/);
+        if (cell) emit('PROGRESS', `${cell[1]} ${cell[2]}`);
+
         if (/\[TIMING\]|ERROR|Exception|isosurface|Export/i.test(line)) {
           console.log('  ' + line.slice(0, 200));
         }
@@ -84,6 +108,7 @@ console.log(
 );
 
 const t0 = Date.now();
+emit('STAGE', 'overpass');
 // Overpass is the slowest and least reliable step; reuse an extract when the
 // same job directory already has one so tuning runs don't re-hammer the API.
 const cached = await stat(osmFile).catch(() => null);
@@ -96,6 +121,7 @@ if (cached && cached.size > 0) {
   );
 }
 const tOsm = Date.now();
+emit('STAGE', 'import');
 
 // Import_OSM writes into fixed table names, so a leftover H2 file from a previous
 // run would be appended to rather than replaced. Drop it, keeping the OSM extract.
@@ -160,3 +186,4 @@ console.log(
 );
 console.log(`  ${outFile}`);
 console.log(`TOTAL ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+emit('RESULT', outFile);

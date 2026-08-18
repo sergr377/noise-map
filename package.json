@@ -5,12 +5,19 @@
   "type": "module",
   "description": "Road traffic noise map: OpenStreetMap -> CNOSSOS-EU (NoiseModelling) -> isophones on Yandex Maps",
   "scripts": {
-    "job": "node scripts/run-job.mjs"
+    "job": "node scripts/run-job.mjs",
+    "build:server": "tsc -p server/tsconfig.json",
+    "server": "npm run build:server && node server/dist/index.js",
+    "typecheck": "tsc -p server/tsconfig.json --noEmit"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
     "undici": "^7.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
   }
 }
