@@ -12,6 +12,22 @@ import {
   type Period,
 } from './api';
 
+const DEFAULT_CENTER: [number, number] = [37.6173, 55.7558];
+
+/**
+ * A result is worth linking to, so the picked point lives in the URL. It also
+ * makes the app reproducible from the outside — screenshots and bug reports can
+ * name an exact location instead of "click roughly here".
+ */
+function readLocationFromUrl(): { lat: number; lon: number } | null {
+  const params = new URLSearchParams(window.location.search);
+  const lat = Number(params.get('lat'));
+  const lon = Number(params.get('lon'));
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return { lat, lon };
+}
+
 // Period boundaries are CNOSSOS-EU's, matching the LV_D / LV_E / LV_N traffic
 // columns that Import_OSM fills in.
 const PERIODS: Array<{ id: Period; label: string; hint: string }> = [
@@ -58,6 +74,16 @@ export default function App() {
   const [fromCache, setFromCache] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Read once: later picks rewrite the URL, and re-reading it would loop.
+  const [deepLink] = useState(readLocationFromUrl);
+  const initialLocation = useMemo(
+    () => ({
+      center: deepLink ? ([deepLink.lon, deepLink.lat] as [number, number]) : DEFAULT_CENTER,
+      zoom: 15,
+    }),
+    [deepLink],
+  );
+
   useEffect(() => {
     let cancelled = false;
     import('./ymaps')
@@ -75,6 +101,11 @@ export default function App() {
   const smoothed = useSmoothProgress(job?.progress ?? 0, busy && !fromCache);
 
   const handlePick = useCallback(async (lat: number, lon: number) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('lat', lat.toFixed(5));
+    url.searchParams.set('lon', lon.toFixed(5));
+    window.history.replaceState(null, '', url);
+
     setBusy(true);
     setError(null);
     setData(null);
@@ -94,6 +125,14 @@ export default function App() {
     }
   }, []);
 
+  // Kick off the deep-linked calculation once the map module is in place, so the
+  // marker and isophones land on a map that already exists.
+  useEffect(() => {
+    if (maps && deepLink) {
+      void handlePick(deepLink.lat, deepLink.lon);
+    }
+  }, [maps, deepLink, handlePick]);
+
   const visible = useMemo(
     () => (data?.features ?? []).filter((f) => f.properties.PERIOD === period),
     [data, period],
@@ -104,7 +143,13 @@ export default function App() {
   return (
     <div className="app">
       {maps ? (
-        <MapCanvas maps={maps} features={visible} centre={centre} onPick={handlePick} />
+        <MapCanvas
+          maps={maps}
+          initialLocation={initialLocation}
+          features={visible}
+          centre={centre}
+          onPick={handlePick}
+        />
       ) : (
         <div className="map-placeholder">
           {mapError ? (

@@ -3,18 +3,18 @@ import { bandFor } from './palette';
 import type { Centre, IsophoneCollection } from './api';
 import type { LngLat } from '@yandex/ymaps3-types';
 
-const START_LOCATION = { center: [37.6173, 55.7558] as [number, number], zoom: 15 };
-
 interface Props {
   /** The bootstrapped map module. Mounted only once it has loaded, so that the
    *  hooks below are never called conditionally. */
   maps: typeof Ymaps;
+  /** Where the viewport opens. Read once — the map owns its camera afterwards. */
+  initialLocation: { center: [number, number]; zoom: number };
   features: IsophoneCollection['features'];
   centre: Centre | null;
   onPick: (lat: number, lon: number) => void;
 }
 
-export default function MapCanvas({ maps, features, centre, onPick }: Props) {
+export default function MapCanvas({ maps, initialLocation, features, centre, onPick }: Props) {
   const {
     reactify,
     YMap,
@@ -27,7 +27,7 @@ export default function MapCanvas({ maps, features, centre, onPick }: Props) {
 
   // Uncontrolled: the map owns its viewport afterwards, so panning and zooming
   // are not fought by re-renders.
-  const location = reactify.useDefault(START_LOCATION);
+  const location = reactify.useDefault(initialLocation);
 
   const handleClick = (_object: unknown, event: { coordinates: LngLat }) => {
     const [lon, lat] = event.coordinates;
