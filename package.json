@@ -1,0 +1,16 @@
+{
+  "name": "noise-map",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Road traffic noise map: OpenStreetMap -> CNOSSOS-EU (NoiseModelling) -> isophones on Yandex Maps",
+  "scripts": {
+    "job": "node scripts/run-job.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "undici": "^7.29.0"
+  }
+}

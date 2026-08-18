@@ -1,0 +1,8 @@
+node_modules/
+dist/
+
+# NoiseModelling distribution (148 MB) — fetched by `npm run setup`
+.tools/
+
+# Per-run job directories: OSM extracts, H2 database files, output GeoJSON
+jobs/

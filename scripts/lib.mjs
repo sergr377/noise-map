@@ -1,0 +1,123 @@
+import { writeFile } from 'node:fs/promises';
+import { setDefaultResultOrder } from 'node:dns';
+import { ProxyAgent, setGlobalDispatcher } from 'undici';
+
+// Without this, resolution can hand back a AAAA record first and undici stalls
+// for its full 10s connect timeout before ever trying IPv4.
+setDefaultResultOrder('ipv4first');
+
+// Node 22's fetch ignores HTTP(S)_PROXY, unlike curl or PowerShell. On a machine
+// where Overpass is only reachable through a local proxy that looks like the
+// endpoint being down, so honour the env vars explicitly.
+const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+if (proxyUrl) {
+  setGlobalDispatcher(new ProxyAgent(proxyUrl));
+}
+
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+];
+
+/**
+ * Bounding box around a point. Latitude degrees are ~constant in length;
+ * longitude degrees shrink with the cosine of the latitude.
+ */
+export function bboxAround(lat, lon, radiusMeters) {
+  const dLat = radiusMeters / 111320;
+  const dLon = radiusMeters / (111320 * Math.cos((lat * Math.PI) / 180));
+  return {
+    south: lat - dLat,
+    west: lon - dLon,
+    north: lat + dLat,
+    east: lon + dLon,
+  };
+}
+
+/**
+ * CNOSSOS propagation runs in metres, so the data has to land in a metric CRS.
+ * UTM keeps distortion under ~1/1000 inside a zone, which is well below the
+ * uncertainty of the traffic estimates feeding the model.
+ */
+export function utmSrid(lat, lon) {
+  const zone = Math.floor((lon + 180) / 6) + 1;
+  return (lat >= 0 ? 32600 : 32700) + zone;
+}
+
+/**
+ * `out meta` is deliberate: the osmosis XML reader used by Import_OSM expects
+ * the version attribute that only the meta output carries.
+ */
+/**
+ * EWKT rectangle in WGS84. NoiseModelling reprojects it into the working CRS
+ * and takes its envelope, so this only ever needs to be axis-aligned.
+ */
+export function bboxEwkt({ south, west, north, east }) {
+  const ring = [
+    [west, south],
+    [east, south],
+    [east, north],
+    [west, north],
+    [west, south],
+  ]
+    .map(([x, y]) => `${x} ${y}`)
+    .join(', ');
+  return `SRID=4326;POLYGON((${ring}))`;
+}
+
+export function overpassQuery({ south, west, north, east }) {
+  const bbox = `${south},${west},${north},${east}`;
+  return `[out:xml][timeout:180];
+(
+  way["highway"](${bbox});
+  way["building"](${bbox});
+  relation["building"](${bbox});
+  way["landuse"](${bbox});
+  way["natural"](${bbox});
+  way["leisure"](${bbox});
+);
+(._;>;);
+out meta;`;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Public Overpass instances routinely answer 504 or 429 under load, so a single
+ * attempt is not a meaningful test of availability. Rounds alternate endpoints
+ * and back off between passes.
+ */
+export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
+  const query = overpassQuery(bbox);
+  const errors = [];
+
+  for (let round = 0; round < rounds; round++) {
+    if (round > 0) await sleep(5000 * round);
+    for (const endpoint of OVERPASS_ENDPOINTS) {
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'noise-map/0.1 (OSM road noise mapping)',
+          },
+          body: new URLSearchParams({ data: query }),
+          signal: AbortSignal.timeout(240_000),
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        }
+        const xml = await res.text();
+        // Overpass reports rate limits and timeouts as a 200 with an error document.
+        if (xml.includes('<remark>') && !xml.includes('<node')) {
+          throw new Error(`remark: ${xml.slice(0, 300)}`);
+        }
+        await writeFile(outPath, xml, 'utf8');
+        return { bytes: Buffer.byteLength(xml), path: outPath, endpoint };
+      } catch (err) {
+        errors.push(`round ${round} ${new URL(endpoint).host}: ${err.message}`);
+      }
+    }
+  }
+  throw new Error(`all Overpass endpoints failed\n  ${errors.join('\n  ')}`);
+}
