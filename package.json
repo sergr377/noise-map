@@ -8,16 +8,25 @@
     "job": "node scripts/run-job.mjs",
     "build:server": "tsc -p server/tsconfig.json",
     "server": "npm run build:server && node server/dist/index.js",
-    "typecheck": "tsc -p server/tsconfig.json --noEmit"
+    "web": "vite",
+    "build:web": "vite build",
+    "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "undici": "^7.29.0"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
-    "typescript": "^7.0.2"
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "@yandex/ymaps3-types": "^1.0.20315584",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
   }
 }
