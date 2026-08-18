@@ -16,6 +16,7 @@ import org.h2gis.api.ProgressVisitor
 import org.noise_planet.noisemodelling.scripts.Acoustic_Tools.Create_Isosurface
 import org.noise_planet.noisemodelling.scripts.Geometric_Tools.Change_SRID
 import org.noise_planet.noisemodelling.scripts.Import_and_Export.Export_Table
+import org.noise_planet.noisemodelling.scripts.Import_and_Export.Import_Asc_File
 import org.noise_planet.noisemodelling.scripts.Import_and_Export.Import_OSM
 import org.noise_planet.noisemodelling.scripts.NoiseModelling.Noise_level_from_traffic
 import org.noise_planet.noisemodelling.scripts.Receivers.Delaunay_Grid
@@ -61,6 +62,19 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
     ])
     stamp('Import_OSM')
 
+    // 1b. Optional terrain. The raster arrives in WGS84 and is reprojected into
+    //     the working CRS, because propagation needs every layer in the same
+    //     metric system.
+    boolean withDem = p.demFile != null && !(p.demFile as String).isEmpty()
+    if (withDem) {
+        new Import_Asc_File().exec(connection, [
+                pathFile  : p.demFile as String,
+                inputSRID : 4326
+        ])
+        new Change_SRID().exec(connection, [tableName: 'DEM', newSRID: p.srid as Integer])
+        stamp('Import_Asc_File')
+    }
+
     // 2. Receiver mesh. Delaunay (not Regular_Grid) is required because
     //    Create_Isosurface consumes the TRIANGLES table this block emits.
     //    The fence keeps receivers inside the area we actually display, while
@@ -80,7 +94,7 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
     // 3. CNOSSOS-EU propagation.
     //    Diffraction is off by default in NoiseModelling; without it, courtyards
     //    come out as loud as the street they hide behind, so enable it explicitly.
-    def res = new Noise_level_from_traffic().exec(connection, [
+    def noiseInputs = [
             tableBuilding     : 'BUILDINGS',
             tableRoads        : 'ROADS',
             tableReceivers    : 'RECEIVERS',
@@ -90,7 +104,12 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
             confDiffHorizontal: p.diffHorizontal as Boolean,
             confReflOrder     : p.reflOrder as Integer,
             confThreadNumber  : 0
-    ], pv)
+    ]
+    if (withDem) {
+        noiseInputs['tableDEM'] = 'DEM'
+    }
+
+    def res = new Noise_level_from_traffic().exec(connection, noiseInputs, pv)
     stamp('Noise_level_from_traffic')
     logger.info('levels table: {}', res.result)
 

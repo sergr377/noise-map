@@ -10,6 +10,7 @@ import { mkdir, writeFile, readFile, stat, rm, readdir } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { bboxAround, bboxEwkt, utmSrid, fetchOsm } from './lib.mjs';
+import { writeDemAsc } from './dem.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NM_HOME = path.join(ROOT, '.tools', 'nm', 'NoiseModelling_6.0.0');
@@ -31,6 +32,8 @@ function parseArgs(argv) {
     reflOrder: 1,
     simplifyTolerance: 1.0,
     coordDecimals: 6,
+    dem: 1,
+    demCellsize: 0.00025,
   };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].replace(/^--/, '');
@@ -120,6 +123,24 @@ if (cached && cached.size > 0) {
     `  overpass: ${(bytes / 1024 / 1024).toFixed(1)} MB in ${((Date.now() - t0) / 1000).toFixed(1)}s via ${new URL(endpoint).host}`,
   );
 }
+// Terrain is optional: it costs a little time and a few tile downloads, and on
+// genuinely flat ground it changes nothing.
+const demFile = path.join(jobDir, `dem_${args.demCellsize}.asc`);
+let demInfo = null;
+if (args.dem) {
+  const cachedDem = await stat(demFile).catch(() => null);
+  if (cachedDem && cachedDem.size > 0) {
+    console.log('  dem: reusing cached raster');
+    demInfo = { cached: true };
+  } else {
+    demInfo = await writeDemAsc(bbox, demFile, { cellsize: args.demCellsize });
+    console.log(
+      `  dem: ${demInfo.points} points from ${demInfo.tiles} tiles, ` +
+        `${demInfo.min.toFixed(0)}–${demInfo.max.toFixed(0)} m (перепад ${(demInfo.max - demInfo.min).toFixed(0)} m)`,
+    );
+  }
+}
+
 const tOsm = Date.now();
 emit('STAGE', 'import');
 
@@ -140,6 +161,7 @@ await writeFile(
       outFile,
       srid,
       fenceWkt,
+      demFile: demInfo ? demFile : '',
       maxArea: args.maxArea,
       maxSrcDist: args.maxSrcDist,
       simplifyTolerance: args.simplifyTolerance,

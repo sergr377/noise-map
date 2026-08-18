@@ -16,6 +16,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "pngjs": "^7.0.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "undici": "^7.29.0"

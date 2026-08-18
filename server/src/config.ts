@@ -49,6 +49,10 @@ export const JOB_PARAMS = {
   reflOrder: 0,
   diffVertical: 1,
   diffHorizontal: 0,
+  // Terrain costs ~60% more propagation time and moves 9.6% of the area into a
+  // different band, lowering the mean by 1.2 dB — slopes screen sound. Worth the
+  // time: without it the model quietly assumes the city is a flat plate.
+  dem: 1,
 } as const;
 
 /**
