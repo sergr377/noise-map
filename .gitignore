@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# Сборка фронтенда. В неё Vite вшивает ключ карт, поэтому в git ей не место.
+dist-web/
 
 # NoiseModelling distribution (148 MB) — fetched by `npm run setup`
 .tools/
