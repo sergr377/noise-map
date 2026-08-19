@@ -12,7 +12,9 @@
 
 import groovy.json.JsonSlurper
 import groovy.sql.Sql
+import org.h2gis.api.EmptyProgressVisitor
 import org.h2gis.api.ProgressVisitor
+import org.noise_planet.noisemodelling.jdbc.utils.IsoSurface
 import org.noise_planet.noisemodelling.scripts.Acoustic_Tools.Create_Isosurface
 import org.noise_planet.noisemodelling.scripts.Geometric_Tools.Change_SRID
 import org.noise_planet.noisemodelling.scripts.Import_and_Export.Export_Table
@@ -27,6 +29,8 @@ import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
 import java.sql.Connection
+import java.sql.DriverManager
+import java.util.concurrent.atomic.AtomicBoolean
 
 title = 'Noise map pipeline'
 description = 'OSM extract -> CNOSSOS-EU road noise -> isosurfaces as WGS84 GeoJSON'
@@ -36,6 +40,219 @@ inputs = [:]
 outputs = [
         result: [name: 'result', title: 'result', description: 'Path of the exported GeoJSON', type: String.class]
 ]
+
+/**
+ * Диск зоны показа в рабочей проекции. Приёмники всегда заполняют описанный
+ * квадрат — Delaunay_Grid берёт от fence только envelope, — поэтому круг
+ * вырезается из готовых изофон.
+ */
+String discExpression(Map p) {
+    return "ST_BUFFER(ST_TRANSFORM(ST_SETSRID(" +
+            "ST_GEOMFROMTEXT('POINT(${p.centreLon} ${p.centreLat})'), 4326), ${p.srid}), " +
+            "${p.radius as Double}, 'quad_segs=16')"
+}
+
+/**
+ * Склейка обрезков в мультиполигоны, обрезка по кругу, перепроецирование и
+ * выгрузка. Общая для финального результата и для частичных кадров: разойтись
+ * этим двум путям нельзя — иначе кадр покажет не то, что окажется в ответе.
+ *
+ * ST_Buffer(geom, 0) чинит самопересечения, из-за которых ST_Union бросает
+ * исключение; упрощение идёт до перепроецирования, пока координаты в метрах,
+ * иначе допуск пришлось бы задавать в долях градуса. Обрезка — последней, после
+ * упрощения, чтобы кромка круга осталась ровной, и ещё один ST_Buffer(...,0)
+ * поверх пересечения убирает вырожденные линии и точки: фронтенд читает Polygon
+ * и MultiPolygon, а GeometryCollection его сломает.
+ */
+Map dissolveClipExport(Connection c, Map p, String contourTable, String dissolvedTable, String outPath) {
+    Sql sql = new Sql(c)
+    String disc = discExpression(p)
+
+    sql.execute("DROP TABLE IF EXISTS ${dissolvedTable}" as String)
+    sql.execute("""
+        CREATE TABLE ${dissolvedTable} AS
+        SELECT ST_BUFFER(
+                   ST_INTERSECTION(
+                       ST_SIMPLIFYPRESERVETOPOLOGY(
+                           ST_UNION(ST_ACCUM(ST_BUFFER(THE_GEOM, 0))),
+                           ${p.simplifyTolerance as Double}
+                       ),
+                       ${disc}
+                   ),
+                   0
+               ) AS THE_GEOM,
+               PERIOD, ISOLVL, ISOLABEL
+        FROM ${contourTable}
+        GROUP BY PERIOD, ISOLVL, ISOLABEL
+    """ as String)
+
+    // Диапазон, целиком лежащий вне круга, переживает обрезку пустой геометрией,
+    // которая выгрузилась бы фичей без координат.
+    int emptied = sql.executeUpdate(
+            "DELETE FROM ${dissolvedTable} WHERE THE_GEOM IS NULL OR ST_ISEMPTY(THE_GEOM)" as String)
+
+    int before = sql.firstRow("SELECT COUNT(*) AS n FROM ${contourTable}" as String).n as Integer
+    int after = sql.firstRow("SELECT COUNT(*) AS n FROM ${dissolvedTable}" as String).n as Integer
+
+    // Метрическая проекция — деталь расчёта, вебу нужен 4326.
+    new Change_SRID().exec(c, [tableName: dissolvedTable, newSRID: 4326])
+    new Export_Table().exec(c, [tableToExport: dissolvedTable, exportPath: outPath])
+
+    return [before: before, after: after, emptied: emptied]
+}
+
+/**
+ * Живой рендер: пока идёт распространение, периодически строит изофоны по уже
+ * посчитанной части приёмников и выгружает их отдельными файлами.
+ *
+ * Это возможно потому, что NoiseModelling пишет результаты не в конце, а по
+ * ходу: NoiseMapWriter отдельным потоком сливает их батчами и коммитит.
+ * Измерено на копии готовой базы — таблица росла 6 148 -> 41 880 -> 132 548
+ * строк, пока расчёт ещё шёл. Второе соединение к встроенной H2 из того же JVM
+ * при этом открывается штатно.
+ *
+ * Кадр строится не блоком Create_Isosurface, а классом IsoSurface напрямую:
+ * блок работает с фиксированными именами таблиц, а кадру нужен свой набор
+ * треугольников и своя таблица вывода, чтобы не мешать финальному проходу.
+ */
+Thread startPartialWatcher(Connection main, Map p, Logger logger, AtomicBoolean stop, int intervalMs) {
+    // Читается на главном потоке: у второго соединения свои метаданные будут
+    // только после того, как оно откроется.
+    String url = main.getMetaData().getURL()
+    String user = main.getMetaData().getUserName()
+
+    return Thread.start('partial-frames') {
+        Connection c = null
+        try {
+            c = ['sa', ''].findResult { pwd ->
+                try { DriverManager.getConnection(url, user, pwd) } catch (Exception ignored) { null }
+            }
+            if (c == null) {
+                logger.warn('[PARTIAL] второе соединение не открылось — живой рендер выключен')
+                return
+            }
+            Sql sql = new Sql(c)
+            // Кадр — украшение, и он не имеет права застопорить расчёт: любой
+            // запрос, ушедший в патологический план, обязан упасть сам.
+            sql.execute('SET QUERY_TIMEOUT 60000')
+            List<Double> isoLevels = (p.isoClass as String).split(',').collect { Double.parseDouble(it.trim()) }
+
+            int frame = 0
+            long shownReceivers = 0
+            long sleepMs = intervalMs
+
+            while (!stop.get()) {
+                // Спим кусочками, иначе join после расчёта ждал бы целый интервал.
+                for (long slept = 0; slept < sleepMs && !stop.get(); slept += 500) {
+                    Thread.sleep(500)
+                }
+                if (stop.get()) break
+
+                long frameStart = System.currentTimeMillis()
+                try {
+                    // Приёмник готов, когда у него есть строки на все периоды:
+                    // писатель кладёт их вместе, и частично заполненный приёмник
+                    // дал бы кадр, где у одного периода дырки, а у другого нет.
+                    int periods = Math.max(1,
+                            sql.firstRow('SELECT COUNT(DISTINCT PERIOD) AS n FROM RECEIVERS_LEVEL').n as Integer)
+                    sql.execute('DROP TABLE IF EXISTS PARTIAL_READY')
+                    sql.execute("""
+                        CREATE TABLE PARTIAL_READY AS
+                        SELECT IDRECEIVER FROM RECEIVERS_LEVEL
+                        GROUP BY IDRECEIVER HAVING COUNT(*) >= ${periods}
+                    """ as String)
+                    // Без ключа H2 перебирает готовых приёмников заново на
+                    // каждый треугольник, и кадр не достраивается никогда —
+                    // проверено, поток вставал в этом запросе на минуты.
+                    sql.execute('ALTER TABLE PARTIAL_READY ALTER COLUMN IDRECEIVER SET NOT NULL')
+                    sql.execute('ALTER TABLE PARTIAL_READY ADD PRIMARY KEY (IDRECEIVER)')
+                    long ready = sql.firstRow('SELECT COUNT(*) AS n FROM PARTIAL_READY').n as Long
+
+                    // Кадр, отличающийся от предыдущего на несколько процентов,
+                    // не стоит своей цены: он считается в том же JVM и отнимает
+                    // ядра у расчёта.
+                    if (ready < 500 || ready < shownReceivers * 1.15) {
+                        continue
+                    }
+
+                    sql.execute('DROP TABLE IF EXISTS TRIANGLES_PARTIAL')
+                    sql.execute("""
+                        CREATE TABLE TRIANGLES_PARTIAL AS
+                        SELECT t.* FROM TRIANGLES t
+                        JOIN PARTIAL_READY a ON a.IDRECEIVER = t.PK_1
+                        JOIN PARTIAL_READY b ON b.IDRECEIVER = t.PK_2
+                        JOIN PARTIAL_READY d ON d.IDRECEIVER = t.PK_3
+                    """)
+                    // CREATE TABLE AS SELECT оставляет колонки nullable, а
+                    // первичный ключ этого не примет.
+                    sql.execute('ALTER TABLE TRIANGLES_PARTIAL ALTER COLUMN PK SET NOT NULL')
+                    sql.execute('ALTER TABLE TRIANGLES_PARTIAL ADD PRIMARY KEY (PK)')
+                    long triangles = sql.firstRow('SELECT COUNT(*) AS n FROM TRIANGLES_PARTIAL').n as Long
+                    if (triangles < 20) continue
+
+                    // Снимок уровней вместо живой таблицы. Ключ на
+                    // RECEIVERS_LEVEL движок ставит только после последней
+                    // ячейки, поэтому во время расчёта каждый поиск приёмника в
+                    // ней — полный скан, и построение изофон не заканчивается
+                    // никогда: замерено, поток стоял в IsoSurface минутами.
+                    // Копия готовых строк стоит секунду и снимает заодно вопрос
+                    // о чтении таблицы, в которую в этот момент пишут.
+                    sql.execute('DROP TABLE IF EXISTS PARTIAL_LEVELS')
+                    sql.execute('''
+                        CREATE TABLE PARTIAL_LEVELS AS
+                        SELECT l.* FROM RECEIVERS_LEVEL l
+                        JOIN PARTIAL_READY r ON r.IDRECEIVER = l.IDRECEIVER
+                    ''')
+                    sql.execute('CREATE INDEX PARTIAL_LEVELS_IDX ON PARTIAL_LEVELS(IDRECEIVER)')
+
+                    sql.execute('DROP TABLE IF EXISTS CONTOURING_PARTIAL')
+                    IsoSurface iso = new IsoSurface(isoLevels, p.srid as Integer)
+                    iso.setPointTable('PARTIAL_LEVELS')
+                    iso.setPointTableField('LAEQ')
+                    iso.setTriangleTable('TRIANGLES_PARTIAL')
+                    iso.setOutputTable('CONTOURING_PARTIAL')
+                    iso.setSmooth(true)
+                    iso.setSmoothCoefficient(1.0d)
+                    // Свой прогресс кадра не должен попадать в общий поток: его
+                    // проценты HTTP-слой принял бы за прогресс расчёта.
+                    iso.setProgressVisitor(new EmptyProgressVisitor())
+                    iso.createTable(c, 'IDRECEIVER')
+
+                    frame += 1
+                    String outPath = new File(new File(p.outFile as String).getParentFile(),
+                            "partial-${frame}.geojson").getAbsolutePath()
+                    def stats = dissolveClipExport(c, p, 'CONTOURING_PARTIAL', 'CONTOURING_PARTIAL_DISSOLVED', outPath)
+                    shownReceivers = ready
+
+                    long cost = System.currentTimeMillis() - frameStart
+                    // Кадры не должны стоить больше десятой части расчёта,
+                    // поэтому пауза растёт вместе с ценой кадра.
+                    sleepMs = Math.max(intervalMs, cost * 9)
+                    logger.info('[PARTIAL] {} ({} приёмников, {} контуров, {} мс)',
+                            outPath, ready, stats.after, cost)
+                } catch (Exception e) {
+                    // Кадр — украшение: расчёт из-за него падать не должен.
+                    logger.warn('[PARTIAL] кадр не построился: {}', e.message)
+                    sleepMs = Math.max(intervalMs, sleepMs)
+                }
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt()
+        } finally {
+            try {
+                if (c != null) {
+                    Sql cleanup = new Sql(c)
+                    ['PARTIAL_READY', 'PARTIAL_LEVELS', 'TRIANGLES_PARTIAL', 'CONTOURING_PARTIAL',
+                     'CONTOURING_PARTIAL_DISSOLVED'].each {
+                        cleanup.execute("DROP TABLE IF EXISTS ${it}" as String)
+                    }
+                    c.close()
+                }
+            } catch (Exception ignored) {
+            }
+        }
+    }
+}
 
 def exec(Connection connection, Map input, ProgressVisitor progress) {
     Logger logger = LoggerFactory.getLogger('noisemap.pipeline')
@@ -114,7 +331,22 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
         noiseInputs['tableDEM'] = 'DEM'
     }
 
-    def res = new Noise_level_from_traffic().exec(connection, noiseInputs, pv)
+    // Живой рендер: кадры строятся, пока идёт распространение. Ноль выключает.
+    int partialIntervalMs = (p.partialIntervalMs ?: 0) as Integer
+    AtomicBoolean stopWatcher = new AtomicBoolean(false)
+    Thread watcher = partialIntervalMs > 0
+            ? startPartialWatcher(connection, p, logger, stopWatcher, partialIntervalMs)
+            : null
+
+    def res
+    try {
+        res = new Noise_level_from_traffic().exec(connection, noiseInputs, pv)
+    } finally {
+        // Наблюдатель обязан остановиться до финальных шагов: дальше таблицы
+        // переименовываются и перепроецируются, и кадр посреди этого сломается.
+        stopWatcher.set(true)
+        watcher?.join()
+    }
     stamp('Noise_level_from_traffic')
     logger.info('levels table: {}', res.result)
 
@@ -224,69 +456,16 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
     ], pv)
     stamp('Create_Isosurface')
 
-    // 5. Dissolve. Create_Isosurface emits one polygon per Delaunay cell, so a
-    //    single noise band arrives as hundreds of adjacent fragments that share
-    //    edges. Merging them per (period, level) collapses that into a handful of
-    //    multipolygons and removes all the interior seams.
-    //
-    //    ST_Buffer(geom, 0) repairs self-intersections that would otherwise make
-    //    ST_Union throw; simplification runs here, while coordinates are still in
-    //    metres, so the tolerance is a real distance rather than a degree fraction.
-    //
-    //    The result is then cut to the disc the caller asked for. It has to
-    //    happen here and not at the receiver grid: Delaunay_Grid takes only the
-    //    *envelope* of its fence (setMainEnvelope in the block's own source), so
-    //    receivers always fill the enclosing square. Cutting last, after the
-    //    simplification, is also what keeps the rim exactly circular — a
-    //    tolerance of a metre would otherwise chew visible flats into it.
-    //
-    //    ST_Buffer(…, 0) around the intersection drops the stray lines and points
-    //    that a polygon/disc intersection can leave behind: the frontend reads
-    //    Polygon and MultiPolygon, and a GeometryCollection would break it.
-    String disc = "ST_BUFFER(ST_TRANSFORM(ST_SETSRID(" +
-            "ST_GEOMFROMTEXT('POINT(${p.centreLon} ${p.centreLat})'), 4326), ${p.srid}), " +
-            "${p.radius as Double}, 'quad_segs=16')"
-
-    sql.execute('DROP TABLE IF EXISTS CONTOURING_DISSOLVED')
-    sql.execute("""
-        CREATE TABLE CONTOURING_DISSOLVED AS
-        SELECT ST_BUFFER(
-                   ST_INTERSECTION(
-                       ST_SIMPLIFYPRESERVETOPOLOGY(
-                           ST_UNION(ST_ACCUM(ST_BUFFER(THE_GEOM, 0))),
-                           ${p.simplifyTolerance as Double}
-                       ),
-                       ${disc}
-                   ),
-                   0
-               ) AS THE_GEOM,
-               PERIOD, ISOLVL, ISOLABEL
-        FROM CONTOURING_NOISE_MAP
-        GROUP BY PERIOD, ISOLVL, ISOLABEL
-    """ as String)
-
-    // A band that lies entirely outside the disc survives the clip as an empty
-    // geometry, which would be exported as a feature with no coordinates.
-    def emptied = sql.executeUpdate(
-            'DELETE FROM CONTOURING_DISSOLVED WHERE THE_GEOM IS NULL OR ST_ISEMPTY(THE_GEOM)')
-
-    def before = sql.firstRow('SELECT COUNT(*) AS n FROM CONTOURING_NOISE_MAP').n
-    def after = sql.firstRow('SELECT COUNT(*) AS n FROM CONTOURING_DISSOLVED').n
+    // 5. Склейка, обрезка по кругу, перепроецирование и выгрузка.
+    //    Create_Isosurface отдаёт по полигону на ячейку Делоне, поэтому один
+    //    диапазон дБ приезжает сотнями смежных обрезков с общими рёбрами.
+    //    Подробности — в dissolveClipExport: тот же путь проходят частичные
+    //    кадры, и разойтись эти два пути не должны.
+    def stats = dissolveClipExport(connection, p, 'CONTOURING_NOISE_MAP', 'CONTOURING_DISSOLVED',
+            p.outFile as String)
     logger.info('[DISSOLVE] {} polygons -> {} multipolygons, {} emptied by the disc',
-            before, after, emptied)
+            stats.before, stats.after, stats.emptied)
     stamp('Dissolve')
-
-    // 6. Reproject to WGS84 — the metric SRID is a calculation detail, web maps want 4326.
-    new Change_SRID().exec(connection, [
-            tableName: 'CONTOURING_DISSOLVED',
-            newSRID  : 4326
-    ])
-    stamp('Change_SRID')
-
-    new Export_Table().exec(connection, [
-            tableToExport: 'CONTOURING_DISSOLVED',
-            exportPath   : p.outFile as String
-    ])
     stamp('Export_Table')
 
     return p.outFile as String

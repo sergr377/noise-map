@@ -101,6 +101,18 @@ The full annotated list is in the README under "Грабли". The ones that bit
   enclosing rectangle. The round display area is cut at the end of the pipeline,
   by intersecting the dissolved isophones with a disc, which is why roughly a
   fifth of the receivers are computed and then thrown away.
+- **`RECEIVERS_LEVEL` fills during the run, not at the end.** `NoiseMapWriter`
+  drains results in batches from its own thread and commits them, so a second
+  connection to the embedded database — `jdbc:h2:<jobdir>/h2gisdb`, user `SA`,
+  password `sa`, opened from the same JVM — sees the table grow while
+  propagation is still going. Measured, not assumed; this is what the partial
+  frames are built from.
+- **That table has no key until the run ends** — the writer applies primary keys
+  as its last act. Anything reading it mid-run must copy the rows it needs into
+  its own indexed table first, which is what the frame builder does. Without
+  that, `IsoSurface` spends minutes per frame in full scans, and a freshly
+  created helper table without a primary key turns the triangle filter into a
+  nested-loop scan. Both were measured the hard way.
 - **Diffraction is off by default.** Without it a courtyard scores the same as the
   street, and the map degrades into "distance from the nearest road".
 - `confMaxSrcDist` defaults to 150 m — distant main roads silently drop out.
@@ -128,6 +140,25 @@ A cancelled job stays in the map as a tombstone so late readers see the final
 state. `startJob` must therefore replace it rather than join it, and the eviction
 timer checks identity before deleting — otherwise it removes the *new* job that
 took the same id.
+
+## Partial frames
+
+While a job runs, the pipeline exports the map as it stands into
+`jobs/<id>/partial-N.geojson` and the server announces each one through the
+`partials` counter in the SSE state; the client fetches it from
+`/api/noise/:id/partial/:n`. Three rules hold this together:
+
+- **The frame and the final result go through the same dissolve/clip code.** If
+  they diverge, a frame shows something the answer will not.
+- **Frames never reach the cache.** Only a finished result may be cached; the
+  files are deleted with the job.
+- **A frame is decoration.** It runs in the same JVM as the calculation, so its
+  cost is capped by backing off to nine times the last frame's duration, and any
+  failure inside it is logged and swallowed rather than allowed to fail the job.
+
+`PARTIAL_INTERVAL_MS` sets the floor between frames; `0` turns them off. It is
+deliberately not part of `JOB_PARAMS` — it changes nothing about the result, and
+adding it there would invalidate the whole cache.
 
 ## Rate limits
 

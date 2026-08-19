@@ -35,6 +35,7 @@ if (!first.body.cached) {
   let buffer = '';
   let lastLabel = '';
   let ticks = 0;
+  let frames = 0;
 
   outer: while (true) {
     const { done, value } = await reader.read();
@@ -47,6 +48,17 @@ if (!first.body.cached) {
       if (!line) continue;
       const state = JSON.parse(line.slice(6));
       ticks += 1;
+      // Промежуточные карты: сервер сообщает только их число, геометрию клиент
+      // забирает сам. Проверяем, что кадр действительно отдаётся и разбирается.
+      if ((state.partials ?? 0) > frames) {
+        frames = state.partials;
+        const res = await fetch(`${BASE}/api/noise/${first.body.id}/partial/${frames}`);
+        const gj = res.ok ? await res.json() : null;
+        console.log(
+          `  [${((Date.now() - t0) / 1000).toFixed(0)}s] кадр ${frames} -> ${res.status}` +
+            (gj ? `, ${gj.features.length} контуров` : ''),
+        );
+      }
       if (state.label !== lastLabel) {
         console.log(
           `  [${((Date.now() - t0) / 1000).toFixed(0)}s] ${state.label} ${(state.progress * 100).toFixed(0)}%`,
@@ -55,7 +67,7 @@ if (!first.body.cached) {
       }
       if (state.stage === 'done' || state.stage === 'error') {
         console.log(`  final:`, state);
-        console.log(`  progress events received: ${ticks}`);
+        console.log(`  progress events received: ${ticks}, промежуточных карт: ${frames}`);
         break outer;
       }
     }

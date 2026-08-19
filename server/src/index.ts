@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -14,7 +14,7 @@ import {
   WEB_DIST,
 } from './config.js';
 import { cacheKey, quantize, readCache, cacheSize } from './cache.js';
-import { startJob, getJob, subscribe, snapshot, cancelJob, stopAll } from './queue.js';
+import { startJob, getJob, subscribe, snapshot, cancelJob, stopAll, partialPath } from './queue.js';
 import { geocode, GeocoderError } from './geocode.js';
 import { clientIp, limitHeaders, take, type Verdict } from './ratelimit.js';
 
@@ -209,6 +209,37 @@ async function handleResult(req: http.IncomingMessage, res: http.ServerResponse,
   return res.end(data);
 }
 
+/**
+ * GET /api/noise/:id/partial/:n — the map as it stood partway through the job.
+ *
+ * Never cached: a frame is a snapshot of an unfinished calculation, and the only
+ * thing worse than waiting for a map is being handed an old half-drawn one.
+ */
+async function handlePartial(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  id: string,
+  index: number,
+) {
+  const file = partialPath(id, index);
+  const data = file ? await readFile(file).catch(() => null) : null;
+  if (!data) {
+    return sendJson(res, 404, { error: 'нет такого промежуточного кадра' });
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/geo+json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    ...CORS,
+  };
+  if (/gzip/.test(req.headers['accept-encoding'] ?? '')) {
+    res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip' });
+    return res.end(await gzipAsync(data));
+  }
+  res.writeHead(200, headers);
+  return res.end(data);
+}
+
 /** GET /api/geocode?q= — address lookup, proxied so the key stays server-side. */
 async function handleGeocode(res: http.ServerResponse, query: string, ip: string) {
   const trimmed = query.trim();
@@ -327,6 +358,11 @@ const server = http.createServer(async (req, res) => {
     const cancel = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})$/);
     if (cancel && req.method === 'DELETE') {
       return handleCancel(res, cancel[1] as string);
+    }
+
+    const frame = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/partial\/(\d{1,4})$/);
+    if (frame && req.method === 'GET') {
+      return await handlePartial(req, res, frame[1] as string, Number(frame[2]));
     }
 
     const match = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/(events|result)$/);

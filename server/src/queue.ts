@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { unlink } from 'node:fs/promises';
 import {
   JOB_PARAMS,
   KILL_GRACE_MS,
+  PARTIAL_INTERVAL_MS,
   MAX_CONCURRENT_JOBS,
   RUN_JOB_SCRIPT,
   ROOT,
@@ -20,6 +22,12 @@ export interface JobState {
   elapsedMs: number;
   error?: string;
   bytes?: number;
+  /**
+   * How many partial maps the job has exported so far. The newest one is at
+   * /api/noise/:id/partial/:n — sending the geometry itself down the event
+   * stream would push megabytes through a channel meant for status lines.
+   */
+  partials?: number;
 }
 
 /**
@@ -61,6 +69,8 @@ interface Job {
   cancelled: boolean;
   /** The pipeline process, while one is running. */
   child: ChildProcess | null;
+  /** Exported partial maps, oldest first. Files live in the job directory. */
+  partials: string[];
 }
 
 const jobs = new Map<string, Job>();
@@ -76,6 +86,7 @@ function snapshot(job: Job): JobState {
     elapsedMs: Date.now() - job.startedAt,
     ...(job.error ? { error: job.error } : {}),
     ...(job.bytes ? { bytes: job.bytes } : {}),
+    ...(job.partials.length ? { partials: job.partials.length } : {}),
   };
 }
 
@@ -152,6 +163,11 @@ function runPipeline(job: Job): Promise<void> {
       '--lon',
       String(job.lon),
       ...Object.entries(JOB_PARAMS).flatMap(([k, v]) => [`--${k}`, String(v)]),
+      // Appended separately from JOB_PARAMS: those are hashed into the cache
+      // key, and how often we draw an intermediate map is not a property of the
+      // result.
+      '--partialIntervalMs',
+      String(PARTIAL_INTERVAL_MS),
     ];
     // detached: the child becomes its own process-group leader, which is what
     // makes killTree able to signal the JVM underneath it. The price is that it
@@ -185,6 +201,11 @@ function runPipeline(job: Job): Promise<void> {
         }
       } else if (kind === 'RESULT') {
         resultPath = payload.trim();
+      } else if (kind === 'PARTIAL') {
+        // A map of everything computed so far. Publishing here is what tells a
+        // watching client that a new frame is worth fetching.
+        job.partials.push(payload.trim());
+        publish(job);
       }
     };
 
@@ -261,6 +282,7 @@ export function startJob(lat: number, lon: number): Job {
     waiters: 1,
     cancelled: false,
     child: null,
+    partials: [],
   };
   jobs.set(id, job);
 
@@ -278,6 +300,7 @@ export function startJob(lat: number, lon: number): Job {
       // already have a new job under this id, and it must not be evicted here.
       setTimeout(() => {
         if (jobs.get(job.id) === job) jobs.delete(job.id);
+        removePartials(job);
       }, 10 * 60_000).unref();
     }
   })();
@@ -344,6 +367,24 @@ export function stopAll(): number {
 
 export function getJob(id: string): Job | undefined {
   return jobs.get(id);
+}
+
+/** Path of the n-th partial map (1-based), while the job that made it is alive. */
+export function partialPath(id: string, index: number): string | undefined {
+  return jobs.get(id)?.partials[index - 1];
+}
+
+/**
+ * Frames are scratch: they live in the job directory and are only meaningful
+ * while someone is watching that job. Dropping them when the job is forgotten
+ * keeps a cancelled or finished run from leaving megabytes behind.
+ */
+function removePartials(job: Job) {
+  for (const file of job.partials.splice(0)) {
+    void unlink(file).catch(() => {
+      /* already gone, or never written */
+    });
+  }
 }
 
 export function subscribe(job: Job, listener: Listener): () => void {

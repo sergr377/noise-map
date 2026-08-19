@@ -6,6 +6,7 @@ import type { Margin } from '@yandex/ymaps3-types';
 import { BANDS } from './palette';
 import {
   cancelJob,
+  fetchPartial,
   fetchResult,
   followJob,
   geocode,
@@ -164,6 +165,12 @@ export default function App() {
 
   const [period, setPeriod] = useState<Period>('DEN');
   const [data, setData] = useState<IsophoneCollection | null>(null);
+  /**
+   * The map as it stands mid-calculation. Rendered exactly like the final one —
+   * the pipeline exports frames in the same shape — and dropped the moment the
+   * real result lands.
+   */
+  const [preview, setPreview] = useState<IsophoneCollection | null>(null);
   const [centre, setCentre] = useState<Centre | null>(null);
   const [job, setJob] = useState<JobState | null>(null);
   const [busy, setBusy] = useState(false);
@@ -184,6 +191,8 @@ export default function App() {
   const [superseded, setSuperseded] = useState(false);
   // The job the cancel button acts on; null until the server has accepted one.
   const [runningId, setRunningId] = useState<string | null>(null);
+  // Highest frame already fetched, so a repeated report does not refetch it.
+  const shownFrame = useRef(0);
   const [cancelled, setCancelled] = useState(false);
 
   const [query, setQuery] = useState('');
@@ -248,9 +257,11 @@ export default function App() {
       setBusy(true);
       setError(null);
       setData(null);
+      setPreview(null);
       setJob(null);
       setCancelled(false);
       setRunningId(null);
+      shownFrame.current = 0;
       try {
         const created = await requestNoise(lat, lon);
         if (!isCurrent()) return;
@@ -270,13 +281,31 @@ export default function App() {
         if (!created.cached) {
           setRunningId(created.id);
           await followJob(created.id, (state) => {
-            if (isCurrent()) setJob(state);
+            if (!isCurrent()) return;
+            setJob(state);
+
+            // A new frame means the map has grown. Fetching happens alongside
+            // the stream rather than blocking it: a frame is decoration, and a
+            // slow or failed one must not disturb the calculation being
+            // followed.
+            const frame = state.partials ?? 0;
+            if (frame > shownFrame.current) {
+              shownFrame.current = frame;
+              void fetchPartial(created.id, frame)
+                .then((collection) => {
+                  if (isCurrent()) setPreview(collection);
+                })
+                .catch(() => {
+                  /* кадр не пришёл — расчёт от этого не страдает */
+                });
+            }
           });
         }
         if (!isCurrent()) return;
         const result = await fetchResult(created.id);
         if (!isCurrent()) return;
         setData(result);
+        setPreview(null);
       } catch (err) {
         // Cancelling is not a failure, and the local handler has already said so.
         if (isCurrent() && !(err instanceof JobCancelled)) setError((err as Error).message);
@@ -364,9 +393,11 @@ export default function App() {
     }
   }, [maps, deepLink, handlePick]);
 
+  // The finished map wins; until it exists, the newest frame stands in for it.
+  const shown = data ?? preview;
   const visible = useMemo(
-    () => (data?.features ?? []).filter((f) => f.properties.PERIOD === period),
-    [data, period],
+    () => (shown?.features ?? []).filter((f) => f.properties.PERIOD === period),
+    [shown, period],
   );
 
   const presentLevels = useMemo(() => new Set(visible.map((f) => f.properties.ISOLVL)), [visible]);
@@ -459,7 +490,7 @@ export default function App() {
               type="button"
               className={p.id === period ? 'active' : ''}
               onClick={() => setPeriod(p.id)}
-              disabled={!data}
+              disabled={!shown}
             >
               {p.label}
               <span>{p.hint}</span>
@@ -488,6 +519,12 @@ export default function App() {
                 )}
               </span>
             </div>
+            {preview && (
+              <p className="note">
+                Показана карта на текущий момент расчёта: чем дальше, тем больше
+                закрашено. Итоговая заменит её целиком.
+              </p>
+            )}
             {superseded && (
               <p className="note">
                 Предыдущий расчёт продолжается на сервере и попадёт в кэш — вернётесь к
@@ -505,8 +542,9 @@ export default function App() {
 
         {cancelled && !busy && (
           <p className="note">
-            Расчёт отменён. Если эту же точку ждал кто-то ещё, счёт продолжается — тогда
-            результат всё равно попадёт в кэш.
+            Расчёт отменён{preview ? '; на карте осталось то, что успело посчитаться' : ''}.
+            Если эту же точку ждал кто-то ещё, счёт продолжается — тогда результат
+            всё равно попадёт в кэш.
           </p>
         )}
 
@@ -526,7 +564,7 @@ export default function App() {
             {[...BANDS].reverse().map((band) => (
               <li
                 key={band.level}
-                className={!data || presentLevels.has(band.level) ? '' : 'absent'}
+                className={!shown || presentLevels.has(band.level) ? '' : 'absent'}
               >
                 <span className="swatch" style={{ background: band.color }} aria-hidden="true" />
                 <span className="range">{band.label}</span>

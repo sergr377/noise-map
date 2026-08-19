@@ -18,6 +18,11 @@ export interface JobState {
   progress: number;
   elapsedMs: number;
   error?: string;
+  /**
+   * How many intermediate maps the job has exported. The newest one is worth
+   * fetching: it is the calculation as it stands right now.
+   */
+  partials?: number;
 }
 
 export interface Centre {
@@ -96,6 +101,14 @@ export async function geocode(query: string): Promise<Place[]> {
 
 export async function fetchResult(id: string): Promise<IsophoneCollection> {
   return asJson<IsophoneCollection>(await fetch(`/api/noise/${id}/result`));
+}
+
+/**
+ * The map as it stood partway through the calculation. Same shape as the final
+ * result, so it renders through exactly the same path.
+ */
+export async function fetchPartial(id: string, index: number): Promise<IsophoneCollection> {
+  return asJson<IsophoneCollection>(await fetch(`/api/noise/${id}/partial/${index}`));
 }
 
 export interface CancelResponse {

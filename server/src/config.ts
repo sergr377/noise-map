@@ -53,6 +53,18 @@ export const CACHE_ONLY = process.env.CACHE_ONLY === '1';
 export const RUN_JOB_SCRIPT = path.join(ROOT, 'scripts', 'run-job.mjs');
 
 /**
+ * How often a running job exports the map of what it has computed so far, so the
+ * caller can watch it appear instead of staring at an empty page for minutes.
+ * Zero switches the frames off.
+ *
+ * Deliberately not part of JOB_PARAMS: it changes nothing about the result, and
+ * putting it there would make the whole cache unreachable over a display
+ * setting. The pipeline also backs off on its own when a frame turns out
+ * expensive, so this is a floor rather than a promise.
+ */
+export const PARTIAL_INTERVAL_MS = Number(process.env.PARTIAL_INTERVAL_MS ?? 60_000);
+
+/**
  * How long a cancelled pipeline gets to exit on its own before it is killed
  * outright. The JVM has nothing to flush here — the grace only avoids leaving a
  * half-written H2 file that the next run would have to delete anyway.

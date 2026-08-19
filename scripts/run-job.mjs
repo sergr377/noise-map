@@ -39,6 +39,10 @@ function parseArgs(argv) {
     // derived from data, so they are never switched on silently.
     rail: 0,
     trainsPerHour: 4,
+    // How often the pipeline exports a partial map while it is still computing.
+    // Off by default: a direct CLI run wants the result, not frames — the server
+    // switches this on because there someone is watching an empty map.
+    partialIntervalMs: 0,
   };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].replace(/^--/, '');
@@ -89,7 +93,15 @@ function runScriptRunner(jobDir, paramsPath) {
         const cell = line.match(/Begin processing of cell (\d+)\/(\d+)/);
         if (cell) emit('PROGRESS', `${cell[1]} ${cell[2]}`);
 
-        if (/\[TIMING\]|ERROR|Exception|isosurface|Export/i.test(line)) {
+        // A map of everything computed so far, exported mid-run. Only the file
+        // name is taken from the log line and the path is rebuilt here: the
+        // JVM writes its console output in the OS encoding, so a job directory
+        // with non-ASCII characters — a Cyrillic user name, say — comes back
+        // mangled and unopenable. The name itself is always ASCII.
+        const partial = line.match(/\[PARTIAL\].*?(partial-\d+\.geojson)/);
+        if (partial) emit('PARTIAL', path.join(jobDir, partial[1]));
+
+        if (/\[TIMING\]|\[PARTIAL\]|ERROR|Exception|isosurface|Export/i.test(line)) {
           console.log('  ' + line.slice(0, 200));
         }
         tail.push(line);
@@ -197,6 +209,7 @@ await writeFile(
       centreLat: args.lat,
       centreLon: args.lon,
       radius: args.radius,
+      partialIntervalMs: args.partialIntervalMs,
       demFile: demInfo ? demFile : '',
       // An empty geometry file would make the rail pass do a full propagation
       // run for nothing, so a location without surface track skips it entirely.
