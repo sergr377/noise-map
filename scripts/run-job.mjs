@@ -51,13 +51,21 @@ function parseArgs(argv) {
 }
 
 function runScriptRunner(jobDir, paramsPath) {
-  const runner = path.join(NM_HOME, 'bin', 'ScriptRunner.bat');
+  // The distribution ships both launchers; the .bat one does not exist in a
+  // Linux container, where the deployment runs.
+  const runner = path.join(
+    NM_HOME,
+    'bin',
+    process.platform === 'win32' ? 'ScriptRunner.bat' : 'ScriptRunner',
+  );
   const script = path.join(ROOT, 'pipeline', 'noise_pipeline.groovy');
   return new Promise((resolve, reject) => {
     const child = spawn(runner, ['-w', jobDir, '-s', script], {
       cwd: NM_HOME,
       env: { ...process.env, NM_PARAMS: paramsPath },
-      shell: true,
+      // .bat files need a shell interpreter; the Unix script has a shebang and
+      // runs directly, which also avoids shell quoting of the paths.
+      shell: process.platform === 'win32',
     });
     // Which stage begins once a given block reports completion.
     const nextStage = {
