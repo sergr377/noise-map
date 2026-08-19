@@ -8,7 +8,8 @@ export type Stage =
   | 'dissolve'
   | 'export'
   | 'done'
-  | 'error';
+  | 'error'
+  | 'cancelled';
 
 export interface JobState {
   id: string;
@@ -28,6 +29,8 @@ export interface CreateResponse {
   id: string;
   cached: boolean;
   centre: Centre;
+  /** Radius of the computed disc, metres. Comes from the server's job params. */
+  radius: number;
   bytes?: number;
 }
 
@@ -95,6 +98,28 @@ export async function fetchResult(id: string): Promise<IsophoneCollection> {
   return asJson<IsophoneCollection>(await fetch(`/api/noise/${id}/result`));
 }
 
+export interface CancelResponse {
+  /** False when the calculation goes on because others are waiting for it. */
+  cancelled: boolean;
+  waiters: number;
+}
+
+/**
+ * Says we are no longer waiting for a calculation. The server stops it once the
+ * last interested client is gone — someone else who clicked the same block keeps
+ * their run.
+ */
+export async function cancelJob(id: string): Promise<CancelResponse> {
+  return asJson<CancelResponse>(await fetch(`/api/noise/${id}`, { method: 'DELETE' }));
+}
+
+/** A job that ended because it was cancelled, not because anything went wrong. */
+export class JobCancelled extends Error {
+  constructor() {
+    super('расчёт отменён');
+  }
+}
+
 /**
  * Follows a running job to completion. Resolves once the pipeline reports done,
  * rejects on a reported error or a dropped connection.
@@ -109,6 +134,9 @@ export function followJob(id: string, onState: (state: JobState) => void): Promi
       if (state.stage === 'done') {
         source.close();
         resolve();
+      } else if (state.stage === 'cancelled') {
+        source.close();
+        reject(new JobCancelled());
       } else if (state.stage === 'error') {
         source.close();
         reject(new Error(state.error ?? 'расчёт завершился ошибкой'));

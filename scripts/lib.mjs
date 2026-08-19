@@ -49,8 +49,10 @@ export function utmSrid(lat, lon) {
  * the version attribute that only the meta output carries.
  */
 /**
- * EWKT rectangle in WGS84. NoiseModelling reprojects it into the working CRS
- * and takes its envelope, so this only ever needs to be axis-aligned.
+ * EWKT rectangle in WGS84. A rectangle is not a simplification: `Delaunay_Grid`
+ * reprojects the fence and then keeps only its envelope (`setMainEnvelope` in
+ * the block's source), so any other shape would end up as this same rectangle.
+ * The round display area is cut from the finished isophones instead.
  */
 export function bboxEwkt({ south, west, north, east }) {
   const ring = [

@@ -2,11 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import type * as Ymaps from './ymaps';
 import MapCanvas from './MapCanvas';
 import { usePanelMargin } from './usePanelMargin';
+import type { Margin } from '@yandex/ymaps3-types';
 import { BANDS } from './palette';
 import {
+  cancelJob,
   fetchResult,
   followJob,
   geocode,
+  JobCancelled,
   requestNoise,
   type Centre,
   type IsophoneCollection,
@@ -16,6 +19,41 @@ import {
 } from './api';
 
 const DEFAULT_CENTER: [number, number] = [37.6173, 55.7558];
+
+/** Opening view, before anything has been computed: the city, not a disc. */
+const DEFAULT_ZOOM = 14.4;
+
+/** Web Mercator ground resolution at the equator, metres per pixel at zoom 0. */
+const EQUATOR_METRES_PER_PIXEL = 156543.03392;
+
+/** How much of the free map area the disc is allowed to fill. */
+const FIT_FILL = 0.92;
+
+/**
+ * Zoom at which the computed disc fills the part of the map the panel leaves
+ * free.
+ *
+ * Framing is computed rather than fixed because both terms move: the radius is a
+ * server-side calculation parameter, and the free area flips between a wide
+ * column next to the panel and a short strip above a bottom sheet. A constant
+ * that suits one of those crops the result in the other.
+ */
+function zoomForDisc(radiusMetres: number, lat: number, margin: Margin): number {
+  const [top, right, bottom, left] = margin;
+  // Before the panel has been measured the margins are zero; the viewport is
+  // still the right answer, just a slightly generous one.
+  const free = Math.min(
+    Math.max(160, window.innerWidth - left - right),
+    Math.max(160, window.innerHeight - top - bottom),
+  );
+  const metresPerPixel = (2 * radiusMetres) / (free * FIT_FILL);
+  const zoom = Math.log2(
+    (EQUATOR_METRES_PER_PIXEL * Math.cos((lat * Math.PI) / 180)) / metresPerPixel,
+  );
+  // The map refuses nothing, but a disc framed at zoom 20 would mean the radius
+  // arrived nonsensical; clamping keeps a bad number from losing the user.
+  return Math.min(17, Math.max(10, Math.round(zoom * 100) / 100));
+}
 
 /**
  * A result is worth linking to, so the picked point lives in the URL. It also
@@ -134,12 +172,19 @@ export default function App() {
 
   const panelRef = useRef<HTMLDivElement>(null);
   const margin = usePanelMargin(panelRef);
+  // Read inside handlePick, which is created once and must not be rebuilt every
+  // time the panel changes height.
+  const marginRef = useRef(margin);
+  marginRef.current = margin;
 
   // Identifies the latest pick so a superseded one cannot write stale state.
   const pickToken = useRef(0);
   // Read inside the handler, which must not be recreated on every busy change.
   const busyRef = useRef(false);
   const [superseded, setSuperseded] = useState(false);
+  // The job the cancel button acts on; null until the server has accepted one.
+  const [runningId, setRunningId] = useState<string | null>(null);
+  const [cancelled, setCancelled] = useState(false);
 
   const [query, setQuery] = useState('');
   const [places, setPlaces] = useState<Place[] | null>(null);
@@ -150,7 +195,7 @@ export default function App() {
   const [deepLink] = useState(readLocationFromUrl);
   const [location, setLocation] = useState(() => ({
     center: deepLink ? ([deepLink.lon, deepLink.lat] as [number, number]) : DEFAULT_CENTER,
-    zoom: 15,
+    zoom: DEFAULT_ZOOM,
   }));
 
   useEffect(() => {
@@ -175,7 +220,7 @@ export default function App() {
   const elapsed = useElapsedSeconds(busy && !fromCache);
 
   const handlePick = useCallback(
-    async (lat: number, lon: number, source: 'map' | 'search' = 'map') => {
+    async (lat: number, lon: number, source: 'map' | 'search' | 'link' = 'map') => {
       // Picking a new point while one is running is legitimate, but the old
       // request must not be able to write its result over the new one when it
       // eventually lands. Everything below is guarded by this token.
@@ -204,12 +249,26 @@ export default function App() {
       setError(null);
       setData(null);
       setJob(null);
+      setCancelled(false);
+      setRunningId(null);
       try {
         const created = await requestNoise(lat, lon);
         if (!isCurrent()) return;
         setCentre(created.centre);
         setFromCache(created.cached);
+        // A deep link or an address search moves the camera anyway, so framing
+        // the disc that is about to appear is part of that same move. A map
+        // click is deliberately left alone: the user chose that view, and
+        // pulling it from under them is worse than a result they have to
+        // zoom out to take in.
+        if (source !== 'map') {
+          setLocation({
+            center: [created.centre.lon, created.centre.lat],
+            zoom: zoomForDisc(created.radius, created.centre.lat, marginRef.current),
+          });
+        }
         if (!created.cached) {
+          setRunningId(created.id);
           await followJob(created.id, (state) => {
             if (isCurrent()) setJob(state);
           });
@@ -219,13 +278,37 @@ export default function App() {
         if (!isCurrent()) return;
         setData(result);
       } catch (err) {
-        if (isCurrent()) setError((err as Error).message);
+        // Cancelling is not a failure, and the local handler has already said so.
+        if (isCurrent() && !(err instanceof JobCancelled)) setError((err as Error).message);
       } finally {
-        if (isCurrent()) setBusy(false);
+        if (isCurrent()) {
+          setBusy(false);
+          setRunningId(null);
+        }
       }
     },
     [],
   );
+
+  /**
+   * Gives up on the running calculation. The server stops it only when nobody
+   * else is waiting for the same place, so this is "I am no longer waiting"
+   * rather than "kill it" — either way the wait here is over immediately, and
+   * the button must not sit disabled while a DELETE travels.
+   */
+  const handleCancel = useCallback(() => {
+    if (!runningId) return;
+    pickToken.current += 1;
+    setBusy(false);
+    setJob(null);
+    setSuperseded(false);
+    setCancelled(true);
+    setRunningId(null);
+    // A failed cancel changes nothing the user can act on: the calculation
+    // simply finishes and lands in the cache, as it did before there was a
+    // cancel button at all.
+    void cancelJob(runningId).catch(() => {});
+  }, [runningId]);
 
   const handleSearch = useCallback(
     async (event: FormEvent) => {
@@ -250,7 +333,10 @@ export default function App() {
     (place: Place) => {
       setPlaces(null);
       setQuery(place.name);
-      setLocation({ center: [place.lon, place.lat], zoom: 16 });
+      // The centre moves at once, so picking an address registers immediately;
+      // the zoom waits for the radius the server sends back a moment later.
+      // Doing both here and then refitting would be two camera jumps in a row.
+      setLocation((prev) => ({ center: [place.lon, place.lat], zoom: prev.zoom }));
       void handlePick(place.lat, place.lon, 'search');
     },
     [handlePick],
@@ -274,7 +360,7 @@ export default function App() {
   // marker and isophones land on a map that already exists.
   useEffect(() => {
     if (maps && deepLink) {
-      void handlePick(deepLink.lat, deepLink.lon);
+      void handlePick(deepLink.lat, deepLink.lon, 'link');
     }
   }, [maps, deepLink, handlePick]);
 
@@ -324,7 +410,7 @@ export default function App() {
         <h1>Карта шума</h1>
         <p className="lead">
           Найдите адрес или кликните по карте — рассчитаем уровень шума от автотранспорта
-          в радиусе 500 м по методу CNOSSOS-EU.
+          в радиусе 750 м по методу CNOSSOS-EU.
         </p>
 
         <form className="search" onSubmit={handleSearch}>
@@ -388,7 +474,19 @@ export default function App() {
             </div>
             <div className="progress-text">
               <span>{job?.label ?? 'Отправляю запрос'}</span>
-              <span>{elapsed} с</span>
+              <span>
+                {elapsed} с
+                {!fromCache && (
+                  <button
+                    type="button"
+                    className="cancel"
+                    onClick={handleCancel}
+                    disabled={!runningId}
+                  >
+                    Отменить
+                  </button>
+                )}
+              </span>
             </div>
             {superseded && (
               <p className="note">
@@ -397,13 +495,20 @@ export default function App() {
               </p>
             )}
             <p className="note">
-              Первый расчёт для нового места занимает 3–10 минут: в плотной застройке
+              Первый расчёт для нового места занимает 6–27 минут: в плотной застройке
               дольше, на окраинах быстрее. Повторный клик рядом отдаётся из кэша мгновенно.
             </p>
           </div>
         )}
 
         {error && <p className="error">Не получилось: {error}</p>}
+
+        {cancelled && !busy && (
+          <p className="note">
+            Расчёт отменён. Если эту же точку ждал кто-то ещё, счёт продолжается — тогда
+            результат всё равно попадёт в кэш.
+          </p>
+        )}
 
         {data && !busy && (
           <p className="note">

@@ -232,21 +232,48 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
     //    ST_Buffer(geom, 0) repairs self-intersections that would otherwise make
     //    ST_Union throw; simplification runs here, while coordinates are still in
     //    metres, so the tolerance is a real distance rather than a degree fraction.
+    //
+    //    The result is then cut to the disc the caller asked for. It has to
+    //    happen here and not at the receiver grid: Delaunay_Grid takes only the
+    //    *envelope* of its fence (setMainEnvelope in the block's own source), so
+    //    receivers always fill the enclosing square. Cutting last, after the
+    //    simplification, is also what keeps the rim exactly circular — a
+    //    tolerance of a metre would otherwise chew visible flats into it.
+    //
+    //    ST_Buffer(…, 0) around the intersection drops the stray lines and points
+    //    that a polygon/disc intersection can leave behind: the frontend reads
+    //    Polygon and MultiPolygon, and a GeometryCollection would break it.
+    String disc = "ST_BUFFER(ST_TRANSFORM(ST_SETSRID(" +
+            "ST_GEOMFROMTEXT('POINT(${p.centreLon} ${p.centreLat})'), 4326), ${p.srid}), " +
+            "${p.radius as Double}, 'quad_segs=16')"
+
     sql.execute('DROP TABLE IF EXISTS CONTOURING_DISSOLVED')
     sql.execute("""
         CREATE TABLE CONTOURING_DISSOLVED AS
-        SELECT ST_SIMPLIFYPRESERVETOPOLOGY(
-                   ST_UNION(ST_ACCUM(ST_BUFFER(THE_GEOM, 0))),
-                   ${p.simplifyTolerance as Double}
+        SELECT ST_BUFFER(
+                   ST_INTERSECTION(
+                       ST_SIMPLIFYPRESERVETOPOLOGY(
+                           ST_UNION(ST_ACCUM(ST_BUFFER(THE_GEOM, 0))),
+                           ${p.simplifyTolerance as Double}
+                       ),
+                       ${disc}
+                   ),
+                   0
                ) AS THE_GEOM,
                PERIOD, ISOLVL, ISOLABEL
         FROM CONTOURING_NOISE_MAP
         GROUP BY PERIOD, ISOLVL, ISOLABEL
     """ as String)
 
+    // A band that lies entirely outside the disc survives the clip as an empty
+    // geometry, which would be exported as a feature with no coordinates.
+    def emptied = sql.executeUpdate(
+            'DELETE FROM CONTOURING_DISSOLVED WHERE THE_GEOM IS NULL OR ST_ISEMPTY(THE_GEOM)')
+
     def before = sql.firstRow('SELECT COUNT(*) AS n FROM CONTOURING_NOISE_MAP').n
     def after = sql.firstRow('SELECT COUNT(*) AS n FROM CONTOURING_DISSOLVED').n
-    logger.info('[DISSOLVE] {} polygons -> {} multipolygons', before, after)
+    logger.info('[DISSOLVE] {} polygons -> {} multipolygons, {} emptied by the disc',
+            before, after, emptied)
     stamp('Dissolve')
 
     // 6. Reproject to WGS84 — the metric SRID is a calculation detail, web maps want 4326.

@@ -20,8 +20,8 @@ services:
       # Кэш результатов и рабочие каталоги переживают пересборку образа.
       - noise-cache:/app/cache
       - noise-jobs:/app/jobs
-    # Пик потребления JVM на плотной застройке — около 1.8 ГБ.
-    mem_limit: 3g
+    # Пик потребления JVM на плотной застройке — 2.2 ГБ на радиусе показа 750 м.
+    mem_limit: 4g
     restart: unless-stopped
 
 volumes:

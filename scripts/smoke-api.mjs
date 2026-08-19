@@ -108,3 +108,77 @@ const bad = await fetch(`${BASE}/api/noise`, {
   body: JSON.stringify({ lat: 'nope', lon: 999 }),
 });
 console.log(`invalid coords -> ${bad.status} ${JSON.stringify(await bad.json())}`);
+
+// --- отмена -----------------------------------------------------------------
+//
+// Точка берётся в стороне от основной, чтобы не попасть в её кэш. Задача живёт
+// секунду и снимается: проверяется, что сервер сообщает об отмене, поток
+// прогресса закрывается стадией `cancelled`, а результата у задачи не будет.
+const spare = { lat: lat + 0.01, lon: lon + 0.01 };
+const cancelTarget = await fetch(`${BASE}/api/noise`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(spare),
+}).then((r) => r.json());
+
+if (cancelTarget.cached) {
+  console.log('cancel: пропущено — соседняя точка уже в кэше');
+} else {
+  // Стадия из SSE, а не из ответа на DELETE: важно именно то, что видит клиент,
+  // который в этот момент следит за прогрессом.
+  const events = await fetch(`${BASE}/api/noise/${cancelTarget.id}/events`);
+  const reader = events.body.getReader();
+  const decoder = new TextDecoder();
+
+  const cancelled = await fetch(`${BASE}/api/noise/${cancelTarget.id}`, { method: 'DELETE' }).then(
+    (r) => r.json(),
+  );
+  console.log(`DELETE /api/noise/:id ->`, cancelled);
+
+  let lastStage = '';
+  let buf = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const parts = buf.split('\n\n');
+    buf = parts.pop() ?? '';
+    for (const part of parts) {
+      const line = part.split('\n').find((l) => l.startsWith('data: '));
+      if (line) lastStage = JSON.parse(line.slice(6)).stage;
+    }
+  }
+  console.log(`  поток закрылся на стадии "${lastStage}" (ожидается cancelled)`);
+
+  const afterCancel = await fetch(`${BASE}/api/noise/${cancelTarget.id}/result`);
+  console.log(
+    `  GET result отменённой -> ${afterCancel.status} ${JSON.stringify(await afterCancel.json())}`,
+  );
+
+  const unknown = await fetch(`${BASE}/api/noise/${'0'.repeat(16)}`, { method: 'DELETE' });
+  console.log(`  DELETE несуществующей -> ${unknown.status}`);
+}
+
+// --- ограничение частоты ----------------------------------------------------
+//
+// Идёт последней: после неё бюджет адреса исчерпан и всё остальное получало бы
+// 429. Запросы намеренно дешёвые — проверяется счётчик, а не работа сервера.
+const burst = 80;
+const codes = [];
+for (let i = 0; i < burst; i += 1) {
+  const res = await fetch(`${BASE}/api/noise/${'f'.repeat(16)}/result`);
+  codes.push({ status: res.status, retryAfter: res.headers.get('retry-after') });
+}
+const refused = codes.filter((c) => c.status === 429);
+if (refused.length === 0) {
+  console.log(
+    `rate limit: ${burst} запросов подряд прошли — адрес в исключениях ` +
+      '(loopback). Чтобы проверить лимит, запустите сервер с RATE_LIMIT_LOOPBACK=1',
+  );
+} else {
+  console.log(
+    `rate limit: ${refused.length} из ${burst} отклонено с 429, ` +
+      `Retry-After=${refused[0].retryAfter} с, первое отклонение на запросе ` +
+      `${codes.findIndex((c) => c.status === 429) + 1}`,
+  );
+}
