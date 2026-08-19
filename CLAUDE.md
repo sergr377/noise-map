@@ -39,7 +39,11 @@ A cold job takes **3–10 minutes across every core and up to 1.8 GB**. Therefor
 
 - **`POST /api/noise` is not a probe — it starts work.** There is currently no way
   to ask whether a location has been computed without computing it. It is easy to
-  tie the machine up for half an hour this way.
+  tie the machine up for half an hour this way. `DELETE /api/noise/:id` takes it
+  back: use it after any job started by mistake instead of waiting it out.
+- **Starting jobs is rate limited** — two in a burst per address, six an hour.
+  Cache hits are not charged, so the prewarmed points stay free to click. The
+  limit does not apply to loopback, which is why local scripts do not trip it.
 - Do not start jobs speculatively. For checks use the prewarmed points: Tverskaya
   `55.7649,37.6055`, Sadovoye `55.7708,37.6335`, Khamovniki `55.7315,37.5806`.
 - Run long jobs in the background and poll no more often than every few tens of
@@ -95,6 +99,39 @@ The full annotated list is in the README under "Грабли". The ones that bit
 - Results come out in a metric projection; the web needs `Change_SRID` to 4326.
 - `CREATE TABLE AS SELECT` leaves columns nullable in H2 and a primary key will not
   accept them — `SET NOT NULL` first.
+
+## Cancelling, and why it is not a kill switch
+
+`cancelJob` removes one waiter and only stops the pipeline when the count reaches
+zero. Requests for the same cell share a run, so a plain kill would let one
+client abort someone else's calculation. Two consequences worth remembering:
+
+- **A caller that leaves without a DELETE keeps the job alive** — a closed tab
+  still computes and still fills the cache. That is deliberate: the browser does
+  not promise to send anything on unload, and cancelling on a dropped SSE stream
+  would break an ordinary page reload.
+- **Killing has to reach the JVM.** The chain is server → `run-job.mjs` →
+  ScriptRunner → java, and only the last link is expensive. Hence `detached` on
+  POSIX plus a negative-pid signal, and `taskkill /T` on Windows. The flip side
+  of `detached` is that pipelines no longer die with the terminal, so the server
+  stops them on SIGINT/SIGTERM — do not remove that hook.
+
+A cancelled job stays in the map as a tombstone so late readers see the final
+state. `startJob` must therefore replace it rather than join it, and the eviction
+timer checks identity before deleting — otherwise it removes the *new* job that
+took the same id.
+
+## Rate limits
+
+Token buckets per IP in `ratelimit.ts`: `job` (starting a calculation), `geocode`
+(someone else's quota) and `api` (everything else). The `job` bucket is charged
+only where new work would begin — not on a cache hit, not on joining a running
+job — and `/api/health` is not charged at all.
+
+Loopback is exempt so `prewarm.mjs` can run; set `RATE_LIMIT_LOOPBACK=1` to test
+the limits locally. `X-Forwarded-For` is read only under `TRUST_PROXY=1`, because
+trusting it on a directly reachable server disables the limiter for anyone who
+sends the header.
 
 ## Cache
 

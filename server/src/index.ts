@@ -4,23 +4,50 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
-import { CACHE_ONLY, PORT, STAGE_LABELS, WEB_DIST } from './config.js';
+import {
+  CACHE_ONLY,
+  KILL_GRACE_MS,
+  PORT,
+  STAGE_LABELS,
+  TERMINAL_STAGES,
+  WEB_DIST,
+} from './config.js';
 import { cacheKey, quantize, readCache, cacheSize } from './cache.js';
-import { startJob, getJob, subscribe, snapshot } from './queue.js';
+import { startJob, getJob, subscribe, snapshot, cancelJob, stopAll } from './queue.js';
 import { geocode, GeocoderError } from './geocode.js';
+import { clientIp, limitHeaders, take, type Verdict } from './ratelimit.js';
 
 const gzipAsync = promisify(gzip);
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
 };
 
-function sendJson(res: http.ServerResponse, status: number, body: unknown) {
+function sendJson(
+  res: http.ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+) {
   const payload = JSON.stringify(body);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS });
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    ...CORS,
+    ...headers,
+  });
   res.end(payload);
+}
+
+/** 429 with the wait in both the header machines read and the text people read. */
+function sendTooMany(res: http.ServerResponse, verdict: Verdict, message: string) {
+  return sendJson(
+    res,
+    429,
+    { error: message, retryAfter: verdict.retryAfter },
+    limitHeaders(verdict),
+  );
 }
 
 async function readBody(req: http.IncomingMessage): Promise<unknown> {
@@ -35,7 +62,7 @@ async function readBody(req: http.IncomingMessage): Promise<unknown> {
 }
 
 /** POST /api/noise — resolve a click to either a cached result or a running job. */
-async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse) {
+async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse, ip: string) {
   const body = (await readBody(req)) as { lat?: unknown; lon?: unknown } | null;
   const lat = Number(body?.lat);
   const lon = Number(body?.lon);
@@ -62,8 +89,38 @@ async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse)
     });
   }
 
+  // The job budget is charged for starting work, not for asking. Joining a run
+  // that is already under way costs the machine nothing, and neither does a
+  // cache hit — both are handled above and below this check.
+  if (!getJob(id)) {
+    const verdict = take('job', ip);
+    if (!verdict.ok) {
+      return sendTooMany(
+        res,
+        verdict,
+        `слишком много расчётов подряд — новый можно запустить через ${verdict.retryAfter} с. ` +
+          'Уже посчитанные места открываются без ограничений.',
+      );
+    }
+  }
+
   const job = startJob(lat, lon);
   return sendJson(res, 202, { id: job.id, cached: false, centre, state: snapshot(job) });
+}
+
+/**
+ * DELETE /api/noise/:id — withdraw interest in a running calculation.
+ *
+ * Answers 200 either way: `cancelled` says whether the pipeline was actually
+ * stopped, and it is not when other callers are still waiting for the same cell.
+ * That is not an error for the caller — their own wait is over regardless.
+ */
+function handleCancel(res: http.ServerResponse, id: string) {
+  const outcome = cancelJob(id);
+  if (!outcome) {
+    return sendJson(res, 404, { error: 'нет такой задачи — возможно, она уже завершилась' });
+  }
+  return sendJson(res, 200, outcome);
 }
 
 /** GET /api/noise/:id/events — progress as server-sent events. */
@@ -106,7 +163,7 @@ function handleEvents(res: http.ServerResponse, id: string) {
   unsubscribe = subscribe(job, (state) => {
     if (res.writableEnded) return;
     res.write(`data: ${JSON.stringify(state)}\n\n`);
-    if (state.stage === 'done' || state.stage === 'error') close();
+    if (TERMINAL_STAGES.has(state.stage)) close();
   });
 
   // The listener already fired and closed the stream; drop the now-known handle.
@@ -123,8 +180,11 @@ async function handleResult(req: http.IncomingMessage, res: http.ServerResponse,
   const data = await readCache(id);
   if (!data) {
     const job = getJob(id);
-    return sendJson(res, job ? 409 : 404, {
-      error: job ? `not ready: ${STAGE_LABELS[job.stage]}` : 'no result for this id',
+    if (!job) return sendJson(res, 404, { error: 'no result for this id' });
+    // A cancelled job will never produce one, so say that rather than "not
+    // ready" — the caller would otherwise keep waiting for it.
+    return sendJson(res, 409, {
+      error: job.stage === 'cancelled' ? 'расчёт отменён' : `not ready: ${STAGE_LABELS[job.stage]}`,
     });
   }
 
@@ -145,10 +205,20 @@ async function handleResult(req: http.IncomingMessage, res: http.ServerResponse,
 }
 
 /** GET /api/geocode?q= — address lookup, proxied so the key stays server-side. */
-async function handleGeocode(res: http.ServerResponse, query: string) {
+async function handleGeocode(res: http.ServerResponse, query: string, ip: string) {
   const trimmed = query.trim();
   if (trimmed.length < 3) {
     return sendJson(res, 400, { error: 'запрос слишком короткий' });
+  }
+  // Metered separately from everything else: each lookup spends the Yandex
+  // quota, which runs out for the whole service and not just for this caller.
+  const verdict = take('geocode', ip);
+  if (!verdict.ok) {
+    return sendTooMany(
+      res,
+      verdict,
+      `слишком много запросов поиска — повторите через ${verdict.retryAfter} с`,
+    );
   }
   try {
     return sendJson(res, 200, { places: await geocode(trimmed) });
@@ -217,14 +287,41 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(204, CORS);
       return res.end();
     }
+    // Liveness probes come from the platform, not from users, and throttling
+    // them would make the service look dead exactly when it is under load.
     if (url.pathname === '/api/health') {
       return sendJson(res, 200, { ok: true });
     }
+
+    const ip = clientIp(req);
+    if (url.pathname.startsWith('/api/')) {
+      const verdict = take('api', ip);
+      if (!verdict.ok) {
+        return sendTooMany(
+          res,
+          verdict,
+          `слишком много запросов — повторите через ${verdict.retryAfter} с`,
+        );
+      }
+      // Advisory headers on the way out too, so a client can slow down before it
+      // is refused. setHeader rather than a writeHead argument: every handler
+      // below writes its own head, including the SSE stream and the static
+      // files, and Node merges what was set here into all of them.
+      for (const [name, value] of Object.entries(limitHeaders(verdict))) {
+        res.setHeader(name, value);
+      }
+    }
+
     if (url.pathname === '/api/noise' && req.method === 'POST') {
-      return await handleCreate(req, res);
+      return await handleCreate(req, res, ip);
     }
     if (url.pathname === '/api/geocode' && req.method === 'GET') {
-      return await handleGeocode(res, url.searchParams.get('q') ?? '');
+      return await handleGeocode(res, url.searchParams.get('q') ?? '', ip);
+    }
+
+    const cancel = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})$/);
+    if (cancel && req.method === 'DELETE') {
+      return handleCancel(res, cancel[1] as string);
     }
 
     const match = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/(events|result)$/);
@@ -252,3 +349,19 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`noise-map api on http://localhost:${PORT}`);
 });
+
+// Pipelines run in their own process group so that cancelling can reach the JVM;
+// the same isolation means they outlive this process unless they are stopped
+// here. `docker stop` sends SIGTERM, Ctrl-C sends SIGINT — both land here.
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => {
+    const stopped = stopAll();
+    if (stopped) console.log(`${signal}: остановлено расчётов — ${stopped}`);
+    server.close();
+    // Leaving immediately would cut short the SIGKILL escalation inside
+    // killTree, orphaning a JVM that ignored the polite signal. Without a
+    // pipeline to wait for there is nothing to wait for: held-open SSE streams
+    // would otherwise keep the process alive indefinitely.
+    setTimeout(() => process.exit(0), stopped ? KILL_GRACE_MS + 500 : 0);
+  });
+}

@@ -53,6 +53,60 @@ export const CACHE_ONLY = process.env.CACHE_ONLY === '1';
 export const RUN_JOB_SCRIPT = path.join(ROOT, 'scripts', 'run-job.mjs');
 
 /**
+ * How long a cancelled pipeline gets to exit on its own before it is killed
+ * outright. The JVM has nothing to flush here — the grace only avoids leaving a
+ * half-written H2 file that the next run would have to delete anyway.
+ */
+export const KILL_GRACE_MS = Number(process.env.KILL_GRACE_MS ?? 5_000);
+
+/**
+ * Client address for rate limiting. Behind a reverse proxy every request arrives
+ * from the proxy, so the real address is only in `X-Forwarded-For` — and that
+ * header is trivially forged, which would let one client pose as thousands.
+ * Trusting it is therefore opt-in and correct only when nothing can reach the
+ * server except the proxy.
+ */
+export const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+
+/**
+ * Requests from the machine itself are not throttled: `prewarm.mjs` starts jobs
+ * back to back through the same API, and the operator warming their own cache is
+ * not the traffic this is defending against. Set RATE_LIMIT_LOOPBACK=1 to drop
+ * the exemption — that is how the limits get tested locally.
+ */
+export const RATE_LIMIT_LOOPBACK = process.env.RATE_LIMIT_LOOPBACK === '1';
+
+/**
+ * Per-IP budgets, as token buckets: `capacity` is how much may be spent at once,
+ * `perHour` how fast it comes back. Zero capacity disables a bucket.
+ *
+ * `job` is the one that matters. A cold calculation costs minutes of every core,
+ * and only one runs at a time, so the whole machine is worth 6–20 jobs an hour —
+ * one address holding six of them is already most of it. Cache hits are not
+ * charged against it: clicking around prewarmed places must stay free, and the
+ * defence is against occupying the queue, not against reading.
+ *
+ * `api` is the flood guard on everything else, and `geocode` is separate because
+ * it spends someone else's quota — the Yandex key — rather than our CPU.
+ */
+export const RATE_LIMITS = {
+  api: {
+    capacity: Number(process.env.RATE_LIMIT_RPM ?? 60),
+    perHour: Number(process.env.RATE_LIMIT_RPM ?? 60) * 60,
+  },
+  geocode: {
+    capacity: Number(process.env.GEOCODE_LIMIT_RPM ?? 20),
+    perHour: Number(process.env.GEOCODE_LIMIT_RPM ?? 20) * 60,
+  },
+  job: {
+    capacity: Number(process.env.JOB_LIMIT_BURST ?? 2),
+    perHour: Number(process.env.JOB_LIMIT_PER_HOUR ?? 6),
+  },
+} as const;
+
+export type LimitName = keyof typeof RATE_LIMITS;
+
+/**
  * Operating point chosen in benchmarking: ~70 s in the densest part of Moscow.
  * See README for the accuracy/speed trade-offs behind each value.
  */
@@ -87,7 +141,11 @@ export type Stage =
   | 'dissolve'
   | 'export'
   | 'done'
-  | 'error';
+  | 'error'
+  | 'cancelled';
+
+/** Stages after which nothing more will be published — the stream can close. */
+export const TERMINAL_STAGES: ReadonlySet<Stage> = new Set<Stage>(['done', 'error', 'cancelled']);
 
 /** Shown to the user as-is; the frontend does not need its own copy of this. */
 export const STAGE_LABELS: Record<Stage, string> = {
@@ -101,4 +159,5 @@ export const STAGE_LABELS: Record<Stage, string> = {
   export: 'Готовлю результат',
   done: 'Готово',
   error: 'Ошибка',
+  cancelled: 'Отменено',
 };

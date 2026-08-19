@@ -4,9 +4,11 @@ import MapCanvas from './MapCanvas';
 import { usePanelMargin } from './usePanelMargin';
 import { BANDS } from './palette';
 import {
+  cancelJob,
   fetchResult,
   followJob,
   geocode,
+  JobCancelled,
   requestNoise,
   type Centre,
   type IsophoneCollection,
@@ -140,6 +142,9 @@ export default function App() {
   // Read inside the handler, which must not be recreated on every busy change.
   const busyRef = useRef(false);
   const [superseded, setSuperseded] = useState(false);
+  // The job the cancel button acts on; null until the server has accepted one.
+  const [runningId, setRunningId] = useState<string | null>(null);
+  const [cancelled, setCancelled] = useState(false);
 
   const [query, setQuery] = useState('');
   const [places, setPlaces] = useState<Place[] | null>(null);
@@ -204,12 +209,15 @@ export default function App() {
       setError(null);
       setData(null);
       setJob(null);
+      setCancelled(false);
+      setRunningId(null);
       try {
         const created = await requestNoise(lat, lon);
         if (!isCurrent()) return;
         setCentre(created.centre);
         setFromCache(created.cached);
         if (!created.cached) {
+          setRunningId(created.id);
           await followJob(created.id, (state) => {
             if (isCurrent()) setJob(state);
           });
@@ -219,13 +227,37 @@ export default function App() {
         if (!isCurrent()) return;
         setData(result);
       } catch (err) {
-        if (isCurrent()) setError((err as Error).message);
+        // Cancelling is not a failure, and the local handler has already said so.
+        if (isCurrent() && !(err instanceof JobCancelled)) setError((err as Error).message);
       } finally {
-        if (isCurrent()) setBusy(false);
+        if (isCurrent()) {
+          setBusy(false);
+          setRunningId(null);
+        }
       }
     },
     [],
   );
+
+  /**
+   * Gives up on the running calculation. The server stops it only when nobody
+   * else is waiting for the same place, so this is "I am no longer waiting"
+   * rather than "kill it" — either way the wait here is over immediately, and
+   * the button must not sit disabled while a DELETE travels.
+   */
+  const handleCancel = useCallback(() => {
+    if (!runningId) return;
+    pickToken.current += 1;
+    setBusy(false);
+    setJob(null);
+    setSuperseded(false);
+    setCancelled(true);
+    setRunningId(null);
+    // A failed cancel changes nothing the user can act on: the calculation
+    // simply finishes and lands in the cache, as it did before there was a
+    // cancel button at all.
+    void cancelJob(runningId).catch(() => {});
+  }, [runningId]);
 
   const handleSearch = useCallback(
     async (event: FormEvent) => {
@@ -388,7 +420,19 @@ export default function App() {
             </div>
             <div className="progress-text">
               <span>{job?.label ?? 'Отправляю запрос'}</span>
-              <span>{elapsed} с</span>
+              <span>
+                {elapsed} с
+                {!fromCache && (
+                  <button
+                    type="button"
+                    className="cancel"
+                    onClick={handleCancel}
+                    disabled={!runningId}
+                  >
+                    Отменить
+                  </button>
+                )}
+              </span>
             </div>
             {superseded && (
               <p className="note">
@@ -404,6 +448,13 @@ export default function App() {
         )}
 
         {error && <p className="error">Не получилось: {error}</p>}
+
+        {cancelled && !busy && (
+          <p className="note">
+            Расчёт отменён. Если эту же точку ждал кто-то ещё, счёт продолжается — тогда
+            результат всё равно попадёт в кэш.
+          </p>
+        )}
 
         {data && !busy && (
           <p className="note">

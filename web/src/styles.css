@@ -339,3 +339,27 @@ body {
     border-radius: 14px 14px 0 0;
   }
 }
+
+/* Sits inside the progress line next to the seconds counter — a quiet link
+   rather than a button, so it never competes with the search action. */
+.progress-text .cancel {
+  margin-left: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.progress-text .cancel:hover:not(:disabled),
+.progress-text .cancel:focus-visible {
+  color: var(--ink);
+}
+
+.progress-text .cancel:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
