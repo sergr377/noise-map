@@ -59,6 +59,12 @@ A cold job takes **6–27 minutes across every core and up to 2.2 GB**. Therefor
   without it some hosts look dead rather than unreachable. The dispatcher is
   installed in `scripts/lib.mjs` and `server/src/config.ts` — **any new code that
   makes network calls must import `lib.mjs` or set up its own `ProxyAgent`.**
+- **The variables have to be in the environment of the *server* process**, not
+  just in some shell. A server started from a terminal without them reaches
+  neither Overpass nor the terrain tiles, so every job dies at its first stage
+  and the map looks broken everywhere at once. This has happened; the server now
+  prints whether a proxy is configured at startup, and a job that dies before it
+  has any OSM data says so instead of blaming the location.
 - **Docker cannot be built here**: virtualisation is disabled in firmware and the
   session has no administrator rights. The `Dockerfile` exists but has never been
   built.

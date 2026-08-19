@@ -163,6 +163,15 @@ export type Stage =
 /** Stages after which nothing more will be published — the stream can close. */
 export const TERMINAL_STAGES: ReadonlySet<Stage> = new Set<Stage>(['done', 'error', 'cancelled']);
 
+/**
+ * Proxy the outgoing requests go through, if any. Exported so the server can say
+ * so at startup: on a machine where Overpass is only reachable through a local
+ * proxy, a server started without these variables fails every single job at the
+ * first stage — and the failure looks like a property of the clicked place
+ * rather than of the environment.
+ */
+export const PROXY_URL = proxyUrl ?? '';
+
 /** Shown to the user as-is; the frontend does not need its own copy of this. */
 export const STAGE_LABELS: Record<Stage, string> = {
   queued: 'В очереди',
@@ -177,3 +186,29 @@ export const STAGE_LABELS: Record<Stage, string> = {
   error: 'Ошибка',
   cancelled: 'Отменено',
 };
+
+/**
+ * What to tell the caller when the pipeline dies, based on how far it got.
+ *
+ * One message for every failure is worse than none: "возможно, поблизости нет
+ * дорог" sent someone looking at their map when the real problem was that
+ * Overpass could not be reached at all. The stage the job died in is the only
+ * thing we know for sure, so the text says exactly that much and no more; the
+ * stack trace stays in the server log.
+ */
+export function failureMessage(stage: Stage): string {
+  switch (stage) {
+    case 'queued':
+      return 'расчёт не удалось запустить';
+    case 'overpass':
+      return (
+        'не удалось получить данные OpenStreetMap — Overpass не ответил. ' +
+        'Это не про выбранное место: попробуйте позже'
+      );
+    case 'import':
+    case 'grid':
+      return 'данные OpenStreetMap не разобрались — возможно, поблизости нет дорог';
+    default:
+      return `расчёт оборвался на этапе «${STAGE_LABELS[stage]}»`;
+  }
+}

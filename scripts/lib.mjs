@@ -117,9 +117,21 @@ export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
         await writeFile(outPath, xml, 'utf8');
         return { bytes: Buffer.byteLength(xml), path: outPath, endpoint };
       } catch (err) {
-        errors.push(`round ${round} ${new URL(endpoint).host}: ${err.message}`);
+        // Node's fetch reports every network problem as a bare "fetch failed".
+        // What distinguishes "the service is down" from "nothing leaves this
+        // machine" sits one level deeper, in err.cause.
+        const cause = err.cause?.code ?? err.cause?.message;
+        errors.push(
+          `round ${round} ${new URL(endpoint).host}: ${err.message}${cause ? ` (${cause})` : ''}`,
+        );
       }
     }
   }
-  throw new Error(`all Overpass endpoints failed\n  ${errors.join('\n  ')}`);
+  // Worth saying out loud: where Overpass is only reachable through a local
+  // proxy, a process started without these variables fails every fetch, and the
+  // symptom reads as a dead service rather than as a missing setting.
+  const proxyNote = proxyUrl
+    ? `proxy: ${proxyUrl}`
+    : 'no proxy configured (HTTPS_PROXY and HTTP_PROXY are empty)';
+  throw new Error(`all Overpass endpoints failed, ${proxyNote}\n  ${errors.join('\n  ')}`);
 }

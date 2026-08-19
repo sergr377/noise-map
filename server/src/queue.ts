@@ -9,6 +9,7 @@ import {
   ROOT,
   STAGE_LABELS,
   TERMINAL_STAGES,
+  failureMessage,
   type Stage,
 } from './config.js';
 import { cacheKey, quantize, writeCache } from './cache.js';
@@ -71,6 +72,12 @@ interface Job {
   child: ChildProcess | null;
   /** Exported partial maps, oldest first. Files live in the job directory. */
   partials: string[];
+  /**
+   * Whether a repeat request should start over instead of being handed this
+   * failure again. True when the job died of something that has nothing to do
+   * with the place — Overpass being unreachable, say.
+   */
+  retryable: boolean;
 }
 
 const jobs = new Map<string, Job>();
@@ -235,14 +242,21 @@ function runPipeline(job: Job): Promise<void> {
           setStage(job, 'error');
         }
       } else {
-        // The raw tail is a Java stack trace — useful in the log, meaningless to
-        // whoever clicked the map. The usual cause is a spot with no roads in
-        // OpenStreetMap, so say that and keep the detail server-side.
+        // The raw tail is a Java stack trace or a failed network call — useful
+        // in the log, meaningless to whoever clicked the map. What the caller
+        // is told instead comes from the stage the job died in, which has to be
+        // read before setStage overwrites it.
+        const failedAt = job.stage;
         console.error(
-          `job ${job.id} at ${job.lat},${job.lon} failed (code ${code}):\n${stderrTail.join('\n')}`,
+          `job ${job.id} at ${job.lat},${job.lon} failed (code ${code}) on stage ` +
+            `${failedAt}:\n${stderrTail.join('\n')}`,
         );
-        job.error =
-          'не удалось рассчитать — возможно, поблизости нет дорог в OpenStreetMap';
+        job.error = failureMessage(failedAt);
+        // A failure before any OpenStreetMap data was in hand says nothing about
+        // the location, so clicking again should try again rather than replay
+        // the same message for ten minutes. A failure further along is about
+        // this place and would only burn minutes to reproduce.
+        job.retryable = failedAt === 'queued' || failedAt === 'overpass';
         setStage(job, 'error');
       }
       resolve();
@@ -257,12 +271,15 @@ function runPipeline(job: Job): Promise<void> {
 export function startJob(lat: number, lon: number): Job {
   const id = cacheKey(lat, lon);
   const existing = jobs.get(id);
-  if (existing && existing.stage !== 'cancelled') {
+  const spent = existing?.stage === 'cancelled' || (existing?.stage === 'error' && existing.retryable);
+  if (existing && !spent) {
     existing.waiters += 1;
     return existing;
   }
-  // A cancelled entry is a tombstone kept only so a slow client can read the
-  // final state. Joining it would hand the caller a run that is not happening.
+  // A cancelled job, or one that failed for a reason unrelated to the place, is
+  // a tombstone kept only so a slow client can read the final state. Joining it
+  // would hand the caller a run that is not happening, or a stale complaint
+  // about a network that may since have come back.
   if (existing) jobs.delete(id);
 
   // Compute at the cell centre, not at the raw click. The cache is keyed by cell,
@@ -283,6 +300,7 @@ export function startJob(lat: number, lon: number): Job {
     cancelled: false,
     child: null,
     partials: [],
+    retryable: false,
   };
   jobs.set(id, job);
 

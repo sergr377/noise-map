@@ -9,6 +9,7 @@ import {
   JOB_PARAMS,
   KILL_GRACE_MS,
   PORT,
+  PROXY_URL,
   STAGE_LABELS,
   TERMINAL_STAGES,
   WEB_DIST,
@@ -396,6 +397,16 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`noise-map api on http://localhost:${PORT}`);
+  // Said out loud because its absence is otherwise invisible until every job
+  // fails: where Overpass is only reachable through a local proxy, a server
+  // started without HTTPS_PROXY cannot fetch anything, and that surfaces as a
+  // broken calculation rather than as a missing setting.
+  console.log(
+    PROXY_URL
+      ? `исходящие запросы через прокси ${PROXY_URL}`
+      : 'прокси не настроен (HTTPS_PROXY и HTTP_PROXY пусты) — если Overpass отсюда' +
+          ' недоступен напрямую, ни один расчёт не запустится',
+  );
 });
 
 // Pipelines run in their own process group so that cancelling can reach the JVM;
