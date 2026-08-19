@@ -47,22 +47,70 @@ const PERIODS: Array<{ id: Period; label: string; hint: string }> = [
   { id: 'DEN', label: 'Lden', hint: 'сводный' },
 ];
 
+/** How far the bar may drift past the last confirmed value, and how fast. */
+const DRIFT_LIMIT = 0.05;
+const DRIFT_PER_SECOND = 0.004;
+
+/**
+ * Seconds since the calculation started, counted locally.
+ *
+ * The server's own elapsed figure only arrives with a progress event, and those
+ * are tens of seconds apart — so the readout used to sit frozen on the same
+ * number while the bar was also capped, and the whole thing looked hung. A
+ * counter that keeps ticking is what tells the user the job is alive.
+ */
+function useElapsedSeconds(running: boolean): number {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!running) {
+      setSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setSeconds(0);
+    const timer = setInterval(() => setSeconds(Math.round((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [running]);
+
+  return seconds;
+}
+
 /**
  * The pipeline reports progress only about eight times across the ~80 s
- * propagation step, so the raw value arrives in visible jumps. Easing towards it
- * keeps the bar moving without inventing progress that has not happened.
+ * propagation step, so the raw value arrives in large jumps with long silences
+ * between them. Easing alone made the bar sprint and then freeze, which reads as
+ * a hang.
+ *
+ * So the bar eases towards the reported value and then keeps creeping very
+ * slowly, capped a few percent past it. The motion says "still working" without
+ * claiming progress that has not been reported: the drift can never reach the
+ * next milestone on its own, and a real report always overtakes it.
  */
 function useSmoothProgress(target: number, active: boolean): number {
   const [shown, setShown] = useState(0);
+  const ceilingRef = useRef(0);
 
   useEffect(() => {
     if (!active) {
       setShown(0);
+      ceilingRef.current = 0;
       return;
     }
+
+    const tick = 80;
     const timer = setInterval(() => {
-      setShown((prev) => (Math.abs(target - prev) < 0.002 ? target : prev + (target - prev) * 0.12));
-    }, 80);
+      // The ceiling walks forward with time but never more than DRIFT_LIMIT
+      // beyond what the server actually confirmed.
+      ceilingRef.current = Math.min(
+        target + DRIFT_LIMIT,
+        Math.max(target, ceilingRef.current + (DRIFT_PER_SECOND * tick) / 1000),
+      );
+      setShown((prev) => {
+        const goal = ceilingRef.current;
+        return Math.abs(goal - prev) < 0.001 ? goal : prev + (goal - prev) * 0.12;
+      });
+    }, tick);
     return () => clearInterval(timer);
   }, [target, active]);
 
@@ -86,6 +134,12 @@ export default function App() {
 
   const panelRef = useRef<HTMLDivElement>(null);
   const margin = usePanelMargin(panelRef);
+
+  // Identifies the latest pick so a superseded one cannot write stale state.
+  const pickToken = useRef(0);
+  // Read inside the handler, which must not be recreated on every busy change.
+  const busyRef = useRef(false);
+  const [superseded, setSuperseded] = useState(false);
 
   const [query, setQuery] = useState('');
   const [places, setPlaces] = useState<Place[] | null>(null);
@@ -113,32 +167,65 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+
   const smoothed = useSmoothProgress(job?.progress ?? 0, busy && !fromCache);
+  const elapsed = useElapsedSeconds(busy && !fromCache);
 
-  const handlePick = useCallback(async (lat: number, lon: number) => {
-    const url = new URL(window.location.href);
-    url.searchParams.set('lat', lat.toFixed(5));
-    url.searchParams.set('lon', lon.toFixed(5));
-    window.history.replaceState(null, '', url);
+  const handlePick = useCallback(
+    async (lat: number, lon: number, source: 'map' | 'search' = 'map') => {
+      // Picking a new point while one is running is legitimate, but the old
+      // request must not be able to write its result over the new one when it
+      // eventually lands. Everything below is guarded by this token.
+      const token = ++pickToken.current;
+      const isCurrent = () => pickToken.current === token;
 
-    setBusy(true);
-    setError(null);
-    setData(null);
-    setJob(null);
-    try {
-      const created = await requestNoise(lat, lon);
-      setCentre(created.centre);
-      setFromCache(created.cached);
-      if (!created.cached) {
-        await followJob(created.id, setJob);
+      const url = new URL(window.location.href);
+      url.searchParams.set('lat', lat.toFixed(5));
+      url.searchParams.set('lon', lon.toFixed(5));
+      window.history.replaceState(null, '', url);
+
+      // A map click means the address in the box no longer describes what is
+      // shown, so it goes away rather than sitting there contradicting the map.
+      if (source === 'map') {
+        setQuery('');
+        setPlaces(null);
+        setSearchError(null);
       }
-      setData(await fetchResult(created.id));
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+
+      // Nothing is actually lost when a running calculation is replaced: the
+      // server finishes it anyway and files it in the cache. Say so, instead of
+      // letting the previous result vanish without explanation.
+      setSuperseded(busyRef.current);
+
+      setBusy(true);
+      setError(null);
+      setData(null);
+      setJob(null);
+      try {
+        const created = await requestNoise(lat, lon);
+        if (!isCurrent()) return;
+        setCentre(created.centre);
+        setFromCache(created.cached);
+        if (!created.cached) {
+          await followJob(created.id, (state) => {
+            if (isCurrent()) setJob(state);
+          });
+        }
+        if (!isCurrent()) return;
+        const result = await fetchResult(created.id);
+        if (!isCurrent()) return;
+        setData(result);
+      } catch (err) {
+        if (isCurrent()) setError((err as Error).message);
+      } finally {
+        if (isCurrent()) setBusy(false);
+      }
+    },
+    [],
+  );
 
   const handleSearch = useCallback(
     async (event: FormEvent) => {
@@ -164,7 +251,7 @@ export default function App() {
       setPlaces(null);
       setQuery(place.name);
       setLocation({ center: [place.lon, place.lat], zoom: 16 });
-      void handlePick(place.lat, place.lon);
+      void handlePick(place.lat, place.lon, 'search');
     },
     [handlePick],
   );
@@ -200,6 +287,9 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* The map fills the app; the panel floats over it and must be free to
+          size itself to its content. */}
+      <div className="map">
       {maps ? (
         <MapCanvas
           maps={maps}
@@ -228,6 +318,7 @@ export default function App() {
           )}
         </div>
       )}
+      </div>
 
       <div className="panel" ref={panelRef}>
         <h1>Карта шума</h1>
@@ -257,7 +348,16 @@ export default function App() {
           <ul className="results">
             {places.map((place) => (
               <li key={`${place.lat},${place.lon}`}>
-                <button type="button" onClick={() => handleSelect(place)}>
+                {/* The visible text lives in two spans, which leaves the button
+                    itself without an accessible name — screen readers would
+                    announce a row of anonymous buttons. */}
+                <button
+                  type="button"
+                  aria-label={
+                    place.description ? `${place.name}, ${place.description}` : place.name
+                  }
+                  onClick={() => handleSelect(place)}
+                >
                   <span className="result-name">{place.name}</span>
                   <span className="result-description">{place.description}</span>
                 </button>
@@ -288,8 +388,14 @@ export default function App() {
             </div>
             <div className="progress-text">
               <span>{job?.label ?? 'Отправляю запрос'}</span>
-              <span>{job ? `${Math.round(job.elapsedMs / 1000)} с` : ''}</span>
+              <span>{elapsed} с</span>
             </div>
+            {superseded && (
+              <p className="note">
+                Предыдущий расчёт продолжается на сервере и попадёт в кэш — вернётесь к
+                той точке, откроется сразу.
+              </p>
+            )}
             <p className="note">
               Первый расчёт для нового места занимает 3–10 минут: в плотной застройке
               дольше, на окраинах быстрее. Повторный клик рядом отдаётся из кэша мгновенно.

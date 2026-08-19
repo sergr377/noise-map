@@ -37,8 +37,11 @@ body {
   height: 100%;
 }
 
-.app > ymaps,
-.app > * {
+/* Only the map fills the viewport. Applying this to every child of .app also
+   stretched the panel, which is why it used to show a slab of empty space
+   below its content instead of ending where the content ends. */
+.map,
+.map > * {
   height: 100%;
 }
 
