@@ -1,6 +1,18 @@
 import { writeFile } from 'node:fs/promises';
 import { setDefaultResultOrder } from 'node:dns';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
+
+// The scripts read the same .env as the server, so a proxy has one place to be
+// written down instead of having to be remembered on every command line. Values
+// already in the environment win — Node does not overwrite them from the file.
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+try {
+  process.loadEnvFile(path.join(ROOT, '.env'));
+} catch {
+  /* no .env present */
+}
 
 // Without this, resolution can hand back a AAAA record first and undici stalls
 // for its full 10s connect timeout before ever trying IPv4.
