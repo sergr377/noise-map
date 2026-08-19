@@ -78,6 +78,16 @@ async function asJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
+export interface ServiceConfig {
+  /** Radius of the area a click covers, metres. */
+  radius: number;
+}
+
+/** Settings the map needs before the first calculation. */
+export async function fetchConfig(): Promise<ServiceConfig> {
+  return asJson<ServiceConfig>(await fetch('/api/config'));
+}
+
 export async function requestNoise(lat: number, lon: number): Promise<CreateResponse> {
   return asJson<CreateResponse>(
     await fetch('/api/noise', {

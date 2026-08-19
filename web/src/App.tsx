@@ -6,6 +6,7 @@ import type { Margin } from '@yandex/ymaps3-types';
 import { BANDS } from './palette';
 import {
   cancelJob,
+  fetchConfig,
   fetchPartial,
   fetchResult,
   followJob,
@@ -162,6 +163,14 @@ export default function App() {
   // throw during module evaluation would take the whole app down with it.
   const [maps, setMaps] = useState<typeof Ymaps | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
+  /**
+   * Radius a click covers. Asked of the server rather than kept as a constant
+   * here: it is a calculation parameter, and a second copy would eventually
+   * describe a circle the results do not match.
+   */
+  const [radius, setRadius] = useState<number | null>(null);
+  /** Where the cursor is over the map, for the ring that previews a click. */
+  const [hover, setHover] = useState<Centre | null>(null);
 
   const [period, setPeriod] = useState<Period>('DEN');
   const [data, setData] = useState<IsophoneCollection | null>(null);
@@ -224,6 +233,20 @@ export default function App() {
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // A failure here costs the preview ring and nothing else, so it stays
+    // quiet: the map, the search and the calculation all work without it.
+    void fetchConfig()
+      .then((config) => {
+        if (!cancelled) setRadius(config.radius);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const smoothed = useSmoothProgress(job?.progress ?? 0, busy && !fromCache);
   const elapsed = useElapsedSeconds(busy && !fromCache);
@@ -414,7 +437,11 @@ export default function App() {
           margin={margin}
           features={visible}
           centre={centre}
+          radius={radius}
+          hover={hover}
+          running={busy && !fromCache}
           onPick={handlePick}
+          onHover={setHover}
         />
       ) : (
         <div className="map-placeholder">

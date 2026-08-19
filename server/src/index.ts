@@ -348,6 +348,13 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // What the interface needs to know before anything has been calculated —
+    // today just the radius, so the map can show what a click would cover.
+    // A copy of that number in the frontend would drift from the one the result
+    // is actually computed with.
+    if (url.pathname === '/api/config' && req.method === 'GET') {
+      return sendJson(res, 200, { radius: JOB_PARAMS.radius });
+    }
     if (url.pathname === '/api/noise' && req.method === 'POST') {
       return await handleCreate(req, res, ip);
     }

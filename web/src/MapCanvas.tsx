@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type * as Ymaps from './ymaps';
 import { bandFor } from './palette';
 import type { Centre, IsophoneCollection } from './api';
@@ -20,8 +21,34 @@ interface Props {
   margin: Margin;
   features: IsophoneCollection['features'];
   centre: Centre | null;
+  /** Radius a calculation covers, metres. Null until the server has said. */
+  radius: number | null;
+  /** Where the cursor is, when it is over the map and nothing is running. */
+  hover: Centre | null;
+  /** Whether a calculation is in flight — that is what turns the ring solid. */
+  running: boolean;
   onPick: (lat: number, lon: number) => void;
+  onHover: (place: Centre | null) => void;
 }
+
+/**
+ * Ring of a disc of the given radius, in the same flat approximation the server
+ * uses for its own bounding boxes. The real disc is cut in a metric projection;
+ * at these radii the two differ by centimetres, which is far below the width of
+ * the line drawing it.
+ */
+function ring(lat: number, lon: number, radiusMetres: number, segments = 72): [number, number][] {
+  const dLat = radiusMetres / 111320;
+  const dLon = radiusMetres / (111320 * Math.cos((lat * Math.PI) / 180));
+  const points: [number, number][] = [];
+  for (let i = 0; i <= segments; i += 1) {
+    const angle = (i / segments) * 2 * Math.PI;
+    points.push([lon + dLon * Math.cos(angle), lat + dLat * Math.sin(angle)]);
+  }
+  return points;
+}
+
+const ACCENT = '#cd463f';
 
 export default function MapCanvas({
   maps,
@@ -29,7 +56,11 @@ export default function MapCanvas({
   margin,
   features,
   centre,
+  radius,
+  hover,
+  running,
   onPick,
+  onHover,
 }: Props) {
   const {
     reactify,
@@ -51,13 +82,17 @@ export default function MapCanvas({
     onPick(lat, lon);
   };
 
-  return (
-    <YMap location={location} margin={margin}>
-      <YMapDefaultSchemeLayer />
-      <YMapDefaultFeaturesLayer />
-      <YMapListener onClick={handleClick} />
+  const handleMove = (_object: unknown, event: { coordinates: LngLat }) => {
+    const [lon, lat] = event.coordinates;
+    onHover({ lat, lon });
+  };
 
-      {features.map((feature) => {
+  // Isophones are the expensive part of this tree — tens of thousands of
+  // coordinates. Holding the elements themselves means a re-render caused by
+  // the cursor moving reuses them instead of walking the geometry again.
+  const isophones = useMemo(
+    () =>
+      features.map((feature) => {
         const band = bandFor(feature.properties.ISOLVL);
         if (!band) return null;
         return (
@@ -76,7 +111,45 @@ export default function MapCanvas({
             }}
           />
         );
-      })}
+      }),
+    [features, YMapFeature],
+  );
+
+  // What a click would cover, followed under the cursor. Dashed, because it is
+  // a proposal rather than a result; it steps aside while something is running,
+  // where the solid ring below says what is actually being computed.
+  const preview = !running && hover && radius ? ring(hover.lat, hover.lon, radius) : null;
+  const active = running && centre && radius ? ring(centre.lat, centre.lon, radius) : null;
+
+  return (
+    <YMap location={location} margin={margin}>
+      <YMapDefaultSchemeLayer />
+      <YMapDefaultFeaturesLayer />
+      <YMapListener onClick={handleClick} onMouseMove={handleMove} onMouseLeave={() => onHover(null)} />
+
+      {isophones}
+
+      {preview && (
+        <YMapFeature
+          geometry={{ type: 'Polygon', coordinates: [preview] }}
+          style={{
+            fill: 'rgba(0, 0, 0, 0)',
+            stroke: [{ color: ACCENT, width: 2, opacity: 0.75, dash: [8, 7] }],
+            zIndex: 500,
+          }}
+        />
+      )}
+
+      {active && (
+        <YMapFeature
+          geometry={{ type: 'Polygon', coordinates: [active] }}
+          style={{
+            fill: 'rgba(0, 0, 0, 0)',
+            stroke: [{ color: ACCENT, width: 2, opacity: 0.9 }],
+            zIndex: 500,
+          }}
+        />
+      )}
 
       {centre && (
         <YMapMarker coordinates={[centre.lon, centre.lat]}>
