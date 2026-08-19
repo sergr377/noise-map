@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type * as Ymaps from './ymaps';
 import MapCanvas from './MapCanvas';
+import { usePanelMargin } from './usePanelMargin';
 import { BANDS } from './palette';
 import {
   fetchResult,
@@ -82,6 +83,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [fromCache, setFromCache] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const panelRef = useRef<HTMLDivElement>(null);
+  const margin = usePanelMargin(panelRef);
 
   const [query, setQuery] = useState('');
   const [places, setPlaces] = useState<Place[] | null>(null);
@@ -165,6 +169,20 @@ export default function App() {
     [handlePick],
   );
 
+  // Re-centre on the computed point when the window is resized. The map applies
+  // the panel margin when a location is set, not when the margin itself changes,
+  // so rotating a phone or flipping the layout breakpoint would otherwise leave
+  // the result off-screen. Deliberately bound to resize rather than to the
+  // margin value: the panel also grows and shrinks as progress and results
+  // appear, and yanking the camera on every such change would be worse.
+  useEffect(() => {
+    if (!centre) return;
+    const recentre = () =>
+      setLocation((prev) => ({ center: [centre.lon, centre.lat], zoom: prev.zoom }));
+    window.addEventListener('resize', recentre);
+    return () => window.removeEventListener('resize', recentre);
+  }, [centre]);
+
   // Kick off the deep-linked calculation once the map module is in place, so the
   // marker and isophones land on a map that already exists.
   useEffect(() => {
@@ -186,6 +204,7 @@ export default function App() {
         <MapCanvas
           maps={maps}
           location={location}
+          margin={margin}
           features={visible}
           centre={centre}
           onPick={handlePick}
@@ -210,7 +229,7 @@ export default function App() {
         </div>
       )}
 
-      <div className="panel">
+      <div className="panel" ref={panelRef}>
         <h1>Карта шума</h1>
         <p className="lead">
           Найдите адрес или кликните по карте — рассчитаем уровень шума от автотранспорта

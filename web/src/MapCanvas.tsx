@@ -1,7 +1,7 @@
 import type * as Ymaps from './ymaps';
 import { bandFor } from './palette';
 import type { Centre, IsophoneCollection } from './api';
-import type { LngLat } from '@yandex/ymaps3-types';
+import type { LngLat, Margin } from '@yandex/ymaps3-types';
 
 interface Props {
   /** The bootstrapped map module. Mounted only once it has loaded, so that the
@@ -13,12 +13,24 @@ interface Props {
    * an ordinary map click.
    */
   location: { center: [number, number]; zoom: number };
+  /**
+   * Part of the map covered by the panel. Passed as an ordinary prop, not
+   * through useDefault, so it follows the panel as its height changes.
+   */
+  margin: Margin;
   features: IsophoneCollection['features'];
   centre: Centre | null;
   onPick: (lat: number, lon: number) => void;
 }
 
-export default function MapCanvas({ maps, location: requested, features, centre, onPick }: Props) {
+export default function MapCanvas({
+  maps,
+  location: requested,
+  margin,
+  features,
+  centre,
+  onPick,
+}: Props) {
   const {
     reactify,
     YMap,
@@ -40,7 +52,7 @@ export default function MapCanvas({ maps, location: requested, features, centre,
   };
 
   return (
-    <YMap location={location}>
+    <YMap location={location} margin={margin}>
       <YMapDefaultSchemeLayer />
       <YMapDefaultFeaturesLayer />
       <YMapListener onClick={handleClick} />
