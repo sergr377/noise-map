@@ -3,7 +3,7 @@ dist/
 # Сборка фронтенда. В неё Vite вшивает ключ карт, поэтому в git ей не место.
 dist-web/
 
-# NoiseModelling distribution (148 MB) — fetched by `npm run setup`
+# NoiseModelling distribution (148 MB) — unpacked by hand, see README
 .tools/
 
 # Per-run job directories: OSM extracts, H2 database files, output GeoJSON
