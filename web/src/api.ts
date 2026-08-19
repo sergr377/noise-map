@@ -29,6 +29,8 @@ export interface CreateResponse {
   id: string;
   cached: boolean;
   centre: Centre;
+  /** Radius of the computed disc, metres. Comes from the server's job params. */
+  radius: number;
   bytes?: number;
 }
 

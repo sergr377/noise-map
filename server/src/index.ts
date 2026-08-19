@@ -6,6 +6,7 @@ import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import {
   CACHE_ONLY,
+  JOB_PARAMS,
   KILL_GRACE_MS,
   PORT,
   STAGE_LABELS,
@@ -75,10 +76,14 @@ async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse,
   // Where the map is actually centred. Clicks snap to a grid, so this can sit
   // up to half a cell from the click and the UI should show it honestly.
   const centre = quantize(lat, lon);
+  // How far the result reaches. Sent rather than duplicated in the frontend:
+  // it is a calculation parameter, and a second copy there would drift from the
+  // one the answer was actually computed with.
+  const radius = JOB_PARAMS.radius;
 
   const bytes = await cacheSize(id);
   if (bytes !== null) {
-    return sendJson(res, 200, { id, cached: true, bytes, centre });
+    return sendJson(res, 200, { id, cached: true, bytes, centre, radius });
   }
 
   if (CACHE_ONLY) {
@@ -105,7 +110,7 @@ async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse,
   }
 
   const job = startJob(lat, lon);
-  return sendJson(res, 202, { id: job.id, cached: false, centre, state: snapshot(job) });
+  return sendJson(res, 202, { id: job.id, cached: false, centre, radius, state: snapshot(job) });
 }
 
 /**
