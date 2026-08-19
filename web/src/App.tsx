@@ -20,6 +20,15 @@ import {
 const DEFAULT_CENTER: [number, number] = [37.6173, 55.7558];
 
 /**
+ * Fractional on purpose. The map used to open at 15, which framed the 500 m
+ * disc; the radius then grew by half, and log2(1.5) is 0.58, so this is the same
+ * framing for the larger area rather than a round number that would either crop
+ * the result or leave it swimming in empty basemap. An address search adds a
+ * step back — there the street matters more than the whole disc.
+ */
+const DEFAULT_ZOOM = 14.4;
+
+/**
  * A result is worth linking to, so the picked point lives in the URL. It also
  * makes the app reproducible from the outside — screenshots and bug reports can
  * name an exact location instead of "click roughly here".
@@ -155,7 +164,7 @@ export default function App() {
   const [deepLink] = useState(readLocationFromUrl);
   const [location, setLocation] = useState(() => ({
     center: deepLink ? ([deepLink.lon, deepLink.lat] as [number, number]) : DEFAULT_CENTER,
-    zoom: 15,
+    zoom: DEFAULT_ZOOM,
   }));
 
   useEffect(() => {
@@ -282,7 +291,7 @@ export default function App() {
     (place: Place) => {
       setPlaces(null);
       setQuery(place.name);
-      setLocation({ center: [place.lon, place.lat], zoom: 16 });
+      setLocation({ center: [place.lon, place.lat], zoom: DEFAULT_ZOOM + 1 });
       void handlePick(place.lat, place.lon, 'search');
     },
     [handlePick],
@@ -356,7 +365,7 @@ export default function App() {
         <h1>Карта шума</h1>
         <p className="lead">
           Найдите адрес или кликните по карте — рассчитаем уровень шума от автотранспорта
-          в радиусе 500 м по методу CNOSSOS-EU.
+          в радиусе 750 м по методу CNOSSOS-EU.
         </p>
 
         <form className="search" onSubmit={handleSearch}>
@@ -441,7 +450,7 @@ export default function App() {
               </p>
             )}
             <p className="note">
-              Первый расчёт для нового места занимает 3–10 минут: в плотной застройке
+              Первый расчёт для нового места занимает 6–27 минут: в плотной застройке
               дольше, на окраинах быстрее. Повторный клик рядом отдаётся из кэша мгновенно.
             </p>
           </div>

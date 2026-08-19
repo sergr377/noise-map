@@ -35,7 +35,7 @@ NM_TABLES=LW_RAILWAY,ROADS .tools/nm/NoiseModelling_6.0.0/bin/ScriptRunner \
 
 ## Computation is expensive, and that shapes everything
 
-A cold job takes **3–10 minutes across every core and up to 1.8 GB**. Therefore:
+A cold job takes **6–27 minutes across every core and up to 2.2 GB**. Therefore:
 
 - **`POST /api/noise` is not a probe — it starts work.** There is currently no way
   to ask whether a location has been computed without computing it. It is easy to
@@ -46,6 +46,8 @@ A cold job takes **3–10 minutes across every core and up to 1.8 GB**. Therefor
   limit does not apply to loopback, which is why local scripts do not trip it.
 - Do not start jobs speculatively. For checks use the prewarmed points: Tverskaya
   `55.7649,37.6055`, Sadovoye `55.7708,37.6335`, Khamovniki `55.7315,37.5806`.
+  They are warm for the current `JOB_PARAMS`; changing any of those parameters
+  empties the cache in effect and the three cost half an hour to warm again.
 - Run long jobs in the background and poll no more often than every few tens of
   seconds.
 
@@ -93,6 +95,12 @@ The full annotated list is in the README under "Грабли". The ones that bit
   `MissingMethodException`.
 - Use `Delaunay_Grid`, not `Regular_Grid`: `Create_Isosurface` consumes the
   `TRIANGLES` table that only Delaunay produces.
+- **`Delaunay_Grid` keeps only the *envelope* of its `fence`** — see
+  `setMainEnvelope` in `scripts/Receivers/Delaunay_Grid.groovy` inside the
+  distribution. Passing a circle changes nothing; receivers always fill the
+  enclosing rectangle. The round display area is cut at the end of the pipeline,
+  by intersecting the dissolved isophones with a disc, which is why roughly a
+  fifth of the receivers are computed and then thrown away.
 - **Diffraction is off by default.** Without it a courtyard scores the same as the
   street, and the map degrades into "distance from the nearest road".
 - `confMaxSrcDist` defaults to 150 m — distant main roads silently drop out.

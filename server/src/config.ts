@@ -107,11 +107,15 @@ export const RATE_LIMITS = {
 export type LimitName = keyof typeof RATE_LIMITS;
 
 /**
- * Operating point chosen in benchmarking: ~70 s in the densest part of Moscow.
- * See README for the accuracy/speed trade-offs behind each value.
+ * Operating point chosen in benchmarking. See README for the accuracy/speed
+ * trade-off behind each value; the current cost is ~830 s cold on Tverskaya,
+ * of which ~790 s is propagation.
  */
 export const JOB_PARAMS = {
-  radius: 500,
+  // Displayed disc. Receivers are still laid out over the enclosing square —
+  // Delaunay_Grid only honours the envelope of its fence — so the shown area is
+  // cut to this radius at the end of the pipeline.
+  radius: 750,
   maxSrcDist: 350,
   maxArea: 5000,
   reflOrder: 0,

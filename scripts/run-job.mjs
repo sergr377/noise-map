@@ -192,6 +192,11 @@ await writeFile(
       outFile,
       srid,
       fenceWkt,
+      // The shown area is a disc around the requested point, cut at the end of
+      // the pipeline: the receiver grid can only be bounded by a rectangle.
+      centreLat: args.lat,
+      centreLon: args.lon,
+      radius: args.radius,
       demFile: demInfo ? demFile : '',
       // An empty geometry file would make the rail pass do a full propagation
       // run for nothing, so a location without surface track skips it entirely.
