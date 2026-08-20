@@ -147,6 +147,29 @@ state. `startJob` must therefore replace it rather than join it, and the evictio
 timer checks identity before deleting — otherwise it removes the *new* job that
 took the same id.
 
+## One run per job directory
+
+A job directory is named after the point (`jobs/<lat>_<lon>_r<radius>s<srcRadius>`)
+and the files in it — `h2gisdb*`, `isophones.geojson`, `partial-N.geojson` — have
+fixed names, so two runs of the same point share one H2 database and interleave
+its tables. That is not hypothetical: on 2026-08-19 a server was killed with
+`taskkill /F`, its pipeline outlived it, and the next click on the same point gave
+a second map. `run-job.mjs` now takes `jobs/<id>/run.lock` before writing anything
+— creating the file with `wx` is the atomic part — and a second run refuses,
+reporting itself through an `@@ERROR` marker that the server shows as-is.
+
+- **The lock is a heartbeat, not just a file.** The holder touches it every 15 s.
+  It counts as abandoned when it has been untouched for a minute **or** its pid is
+  gone. Both halves matter: pids get reused, and a killed run leaves a file that
+  is still fresh — without the pid check a cancelled job could not be restarted
+  for a minute.
+- **Releasing it is best effort.** The exit hook and the SIGINT/SIGTERM handlers
+  remove it, but `taskkill /F` runs nothing, so correctness rests on the takeover
+  above rather than on cleanup.
+- **The directory stays per-point on purpose.** A per-run subdirectory would also
+  have prevented this, but the directory doubles as a cache: the OSM extract and
+  the DEM raster are reused by later runs of the same point.
+
 ## Partial frames
 
 While a job runs, the pipeline exports the map as it stands into

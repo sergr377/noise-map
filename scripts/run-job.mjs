@@ -6,7 +6,9 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdir, writeFile, readFile, stat, rm, readdir } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, stat, rm, readdir, utimes } from 'node:fs/promises';
+import { unlinkSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { bboxAround, bboxEwkt, utmSrid, fetchOsm } from './lib.mjs';
@@ -22,6 +24,129 @@ const NM_HOME = path.join(ROOT, '.tools', 'nm', 'NoiseModelling_6.0.0');
  * stream. The `@@` prefix cannot collide with NoiseModelling's own log format.
  */
 const emit = (kind, payload) => console.log(`@@${kind} ${payload}`);
+
+/**
+ * A job directory is named after the point, not after the run, and every file in
+ * it — the H2 database above all — has a fixed name. Two runs of the same point
+ * therefore share one database and interleave its tables: on 2026-08-19 that gave
+ * two different maps for one point. The lock file makes the directory
+ * single-writer.
+ *
+ * The holder touches the lock every LOCK_HEARTBEAT_MS, so a lock is abandoned
+ * once it has gone quiet for LOCK_STALE_MS or once the process that wrote it is
+ * gone — a run killed outright leaves one behind, under Windows `taskkill /F`
+ * runs no cleanup at all. Both tests are needed: pids get reused, and a lock
+ * written on another machine cannot be checked by pid at all.
+ */
+const LOCK_FILE = 'run.lock';
+const LOCK_HEARTBEAT_MS = 15_000;
+const LOCK_STALE_MS = 60_000;
+
+function pidAlive(pid) {
+  try {
+    // Signal 0 asks whether the process exists without delivering anything.
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means it exists and belongs to someone else.
+    return err.code === 'EPERM';
+  }
+}
+
+async function readLock(lockPath) {
+  const [raw, info] = await Promise.all([
+    readFile(lockPath, 'utf8').catch(() => ''),
+    stat(lockPath).catch(() => null),
+  ]);
+  let held = {};
+  try {
+    held = JSON.parse(raw);
+  } catch {
+    // Caught mid-write, or written by an older version: unreadable is not the
+    // same as absent, so the heartbeat alone decides.
+  }
+  const idleMs = info ? Date.now() - info.mtimeMs : Infinity;
+  // A lock written on another machine can only be judged by its heartbeat.
+  const pidGone = held.host === hostname() && Number.isInteger(held.pid) && !pidAlive(held.pid);
+  return { ...held, idleMs, pidGone, alive: idleMs <= LOCK_STALE_MS && !pidGone };
+}
+
+let heldLock = null;
+
+/**
+ * Takes the job directory for this run, or fails saying who holds it.
+ *
+ * Queuing behind the other run would look friendlier but cannot be honest about
+ * the wait: it is computing the same point and may be anywhere from seconds to
+ * half an hour from the end.
+ */
+async function acquireLock(dir) {
+  const lockPath = path.join(dir, LOCK_FILE);
+  const mine = JSON.stringify({
+    pid: process.pid,
+    host: hostname(),
+    startedAt: new Date().toISOString(),
+  });
+  // Two attempts: the second is for losing the race to take over a stale lock,
+  // and it can only end in EEXIST with a live holder, which is the error below.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await writeFile(lockPath, mine, { flag: 'wx' });
+      heldLock = lockPath;
+      const beat = setInterval(() => {
+        const now = new Date();
+        utimes(lockPath, now, now).catch(() => {
+          /* released, or the directory went away under us */
+        });
+      }, LOCK_HEARTBEAT_MS);
+      // The heartbeat must not be what keeps the process alive at the end.
+      beat.unref();
+      return;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      const held = await readLock(lockPath);
+      if (held.alive) {
+        const busy = new Error(
+          `job directory ${dir} is held by another run (pid ${held.pid ?? '?'} on ` +
+            `${held.host ?? '?'}, started ${held.startedAt ?? '?'}). Both would write the same ` +
+            `H2 database and mix up its tables, so this run stops. Wait for that one to ` +
+            `finish, or stop it, and try again.`,
+        );
+        busy.busy = true;
+        throw busy;
+      }
+      console.log(
+        `  lock: снимаю осиротевший ${LOCK_FILE} (pid ${held.pid ?? '?'}: ` +
+          `${held.pidGone ? 'процесса нет' : `молчит ${(held.idleMs / 1000).toFixed(0)} с`})`,
+      );
+      await rm(lockPath, { force: true });
+    }
+  }
+  throw Object.assign(new Error(`job directory ${dir} is held by another run`), { busy: true });
+}
+
+function releaseLock() {
+  if (!heldLock) return;
+  const lockPath = heldLock;
+  heldLock = null;
+  try {
+    // Synchronous on purpose: this also runs from the exit handler, where
+    // nothing asynchronous would get a chance to finish.
+    unlinkSync(lockPath);
+  } catch {
+    /* already gone */
+  }
+}
+
+process.on('exit', releaseLock);
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  // Default handling ends the process without running the exit handler, so
+  // every cancelled run would leave its lock for the next one to clear.
+  process.on(signal, () => {
+    releaseLock();
+    process.exit(1);
+  });
+}
 
 function parseArgs(argv) {
   const out = {
@@ -124,6 +249,14 @@ const srcRadius = args.srcRadius ?? args.radius + args.maxSrcDist;
 const jobId = `${args.lat.toFixed(4)}_${args.lon.toFixed(4)}_r${args.radius}s${srcRadius}`;
 const jobDir = path.join(ROOT, 'jobs', jobId);
 await mkdir(jobDir, { recursive: true });
+try {
+  await acquireLock(jobDir);
+} catch (err) {
+  // A busy directory is about the machine, not about the place that was clicked,
+  // so the caller is told that rather than being left with a stage name.
+  if (err.busy) emit('ERROR', 'эта точка уже считается — подождите и попробуйте снова');
+  throw err;
+}
 
 const bbox = bboxAround(args.lat, args.lon, srcRadius);
 const fenceWkt = bboxEwkt(bboxAround(args.lat, args.lon, args.radius));

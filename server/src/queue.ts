@@ -186,6 +186,9 @@ function runPipeline(job: Job): Promise<void> {
     job.child = child;
 
     let resultPath: string | null = null;
+    // What the pipeline says about its own failure, when it knows more than the
+    // exit code does — a job directory still held by an orphaned run, say.
+    let pipelineError: string | null = null;
     let stderrTail: string[] = [];
 
     const handleLine = (line: string) => {
@@ -208,6 +211,8 @@ function runPipeline(job: Job): Promise<void> {
         }
       } else if (kind === 'RESULT') {
         resultPath = payload.trim();
+      } else if (kind === 'ERROR') {
+        pipelineError = payload.trim();
       } else if (kind === 'PARTIAL') {
         // A map of everything computed so far. Publishing here is what tells a
         // watching client that a new frame is worth fetching.
@@ -251,12 +256,13 @@ function runPipeline(job: Job): Promise<void> {
           `job ${job.id} at ${job.lat},${job.lon} failed (code ${code}) on stage ` +
             `${failedAt}:\n${stderrTail.join('\n')}`,
         );
-        job.error = failureMessage(failedAt);
+        job.error = pipelineError ?? failureMessage(failedAt);
         // A failure before any OpenStreetMap data was in hand says nothing about
         // the location, so clicking again should try again rather than replay
         // the same message for ten minutes. A failure further along is about
-        // this place and would only burn minutes to reproduce.
-        job.retryable = failedAt === 'queued' || failedAt === 'overpass';
+        // this place and would only burn minutes to reproduce. The pipeline
+        // speaks up only about conditions of the machine, which likewise pass.
+        job.retryable = pipelineError !== null || failedAt === 'queued' || failedAt === 'overpass';
         setStage(job, 'error');
       }
       resolve();
