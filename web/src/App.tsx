@@ -8,6 +8,7 @@ import {
   cancelJob,
   fetchConfig,
   fetchPartial,
+  fetchPreview,
   fetchResult,
   probeNoise,
   followJob,
@@ -205,11 +206,17 @@ export default function App() {
   const [period, setPeriod] = useState<Period>(() => readPeriodFromUrl() ?? 'DEN');
   const [data, setData] = useState<IsophoneCollection | null>(null);
   /**
-   * The map as it stands mid-calculation. Rendered exactly like the final one —
-   * the pipeline exports frames in the same shape — and dropped the moment the
-   * real result lands.
+   * The map shown while the calculation runs. Rendered exactly like the final
+   * one — the pipeline exports both in the same shape — and dropped the moment
+   * the real result lands.
    */
   const [preview, setPreview] = useState<IsophoneCollection | null>(null);
+  /**
+   * Which of the two it is: the rough map of the whole area, or an exact frame
+   * covering part of it. They read very differently, so the note under the
+   * progress bar has to say which one is on screen.
+   */
+  const [previewKind, setPreviewKind] = useState<'rough' | 'frame' | null>(null);
   const [centre, setCentre] = useState<Centre | null>(null);
   const [job, setJob] = useState<JobState | null>(null);
   const [busy, setBusy] = useState(false);
@@ -232,6 +239,8 @@ export default function App() {
   const [runningId, setRunningId] = useState<string | null>(null);
   // Highest frame already fetched, so a repeated report does not refetch it.
   const shownFrame = useRef(0);
+  // The rough map arrives once; this keeps a repeated report from refetching it.
+  const shownRough = useRef(false);
   const [cancelled, setCancelled] = useState(false);
 
   const [query, setQuery] = useState('');
@@ -352,10 +361,12 @@ export default function App() {
       setError(null);
       setData(null);
       setPreview(null);
+      setPreviewKind(null);
       setJob(null);
       setCancelled(false);
       setRunningId(null);
       shownFrame.current = 0;
+      shownRough.current = false;
       try {
         const created = await requestNoise(lat, lon);
         if (!isCurrent()) return;
@@ -378,16 +389,34 @@ export default function App() {
             if (!isCurrent()) return;
             setJob(state);
 
-            // A new frame means the map has grown. Fetching happens alongside
-            // the stream rather than blocking it: a frame is decoration, and a
-            // slow or failed one must not disturb the calculation being
-            // followed.
+            // The rough map of the whole area, minutes before the exact one.
+            // Fetched alongside the stream rather than blocking it: it is a
+            // convenience, and a slow or failed one must not disturb the
+            // calculation being followed.
+            if (state.preview && !shownRough.current) {
+              shownRough.current = true;
+              void fetchPreview(created.id)
+                .then((collection) => {
+                  if (!isCurrent()) return;
+                  setPreview(collection);
+                  setPreviewKind('rough');
+                })
+                .catch(() => {
+                  /* предпросмотр не пришёл — расчёт от этого не страдает */
+                });
+            }
+
+            // A new frame means the exact map has grown. It covers part of the
+            // area, so it must never replace the rough map, which covers all of
+            // it: on screen that would look like the map falling apart.
             const frame = state.partials ?? 0;
-            if (frame > shownFrame.current) {
+            if (frame > shownFrame.current && !shownRough.current) {
               shownFrame.current = frame;
               void fetchPartial(created.id, frame)
                 .then((collection) => {
-                  if (isCurrent()) setPreview(collection);
+                  if (!isCurrent()) return;
+                  setPreview(collection);
+                  setPreviewKind('frame');
                 })
                 .catch(() => {
                   /* кадр не пришёл — расчёт от этого не страдает */
@@ -400,6 +429,7 @@ export default function App() {
         if (!isCurrent()) return;
         setData(result);
         setPreview(null);
+        setPreviewKind(null);
       } catch (err) {
         // Cancelling is not a failure, and the local handler has already said so.
         if (isCurrent() && !(err instanceof JobCancelled)) setError((err as Error).message);
@@ -622,7 +652,15 @@ export default function App() {
                 )}
               </span>
             </div>
-            {preview && (
+            {preview && previewKind === 'rough' && (
+              <p className="note">
+                Показана предварительная оценка: она учитывает только ближние
+                дороги, поэтому уровни занижены примерно на децибел, а десятая
+                часть площади попадёт в соседнюю полосу. Точный расчёт заменит
+                её целиком, не сдвигая контуров.
+              </p>
+            )}
+            {preview && previewKind === 'frame' && (
               <p className="note">
                 Показана карта на текущий момент расчёта: чем дальше, тем больше
                 закрашено. Итоговая заменит её целиком.
@@ -645,7 +683,9 @@ export default function App() {
 
         {cancelled && !busy && (
           <p className="note">
-            Расчёт отменён{preview ? '; на карте осталось то, что успело посчитаться' : ''}.
+            Расчёт отменён
+            {previewKind === 'rough' ? '; на карте осталась предварительная оценка' : ''}
+            {previewKind === 'frame' ? '; на карте осталось то, что успело посчитаться' : ''}.
             Если эту же точку ждал кто-то ещё, счёт продолжается — тогда результат
             всё равно попадёт в кэш.
           </p>

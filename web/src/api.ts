@@ -3,6 +3,7 @@ export type Stage =
   | 'overpass'
   | 'import'
   | 'grid'
+  | 'preview'
   | 'propagation'
   | 'isosurface'
   | 'dissolve'
@@ -23,6 +24,11 @@ export interface JobState {
    * fetching: it is the calculation as it stands right now.
    */
   partials?: number;
+  /**
+   * Whether the rough map of the whole area is ready. Unlike a frame it covers
+   * everything from the start, and it is replaced only by the final result.
+   */
+  preview?: boolean;
 }
 
 export interface Centre {
@@ -138,6 +144,15 @@ export async function fetchResult(id: string): Promise<IsophoneCollection> {
  */
 export async function fetchPartial(id: string, index: number): Promise<IsophoneCollection> {
   return asJson<IsophoneCollection>(await fetch(`/api/noise/${id}/partial/${index}`));
+}
+
+/**
+ * The rough map of the whole area, ready minutes before the exact one. Same
+ * shape again, so it renders through the same path — it differs in what it
+ * says, not in how it is drawn.
+ */
+export async function fetchPreview(id: string): Promise<IsophoneCollection> {
+  return asJson<IsophoneCollection>(await fetch(`/api/noise/${id}/preview`));
 }
 
 export interface CancelResponse {

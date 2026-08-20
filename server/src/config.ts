@@ -53,16 +53,37 @@ export const CACHE_ONLY = process.env.CACHE_ONLY === '1';
 export const RUN_JOB_SCRIPT = path.join(ROOT, 'scripts', 'run-job.mjs');
 
 /**
- * How often a running job exports the map of what it has computed so far, so the
- * caller can watch it appear instead of staring at an empty page for minutes.
- * Zero switches the frames off.
+ * How often a running job exports the map of what it has computed so far. Zero
+ * switches the frames off, and that is the default now: propagation fills the
+ * disc cell by cell, so a frame is exact but covers a quarter of the area — on
+ * Tverskaya the first one arrived at 83 s with 6% of the receivers, and half the
+ * disc was drawn only in the tenth minute. PREVIEW_SRC_DIST below buys the whole
+ * area at once instead, and a frame must never replace it: the map would appear
+ * to shrink back to a quadrant.
  *
  * Deliberately not part of JOB_PARAMS: it changes nothing about the result, and
  * putting it there would make the whole cache unreachable over a display
  * setting. The pipeline also backs off on its own when a frame turns out
  * expensive, so this is a floor rather than a promise.
  */
-export const PARTIAL_INTERVAL_MS = Number(process.env.PARTIAL_INTERVAL_MS ?? 60_000);
+export const PARTIAL_INTERVAL_MS = Number(process.env.PARTIAL_INTERVAL_MS ?? 0);
+
+/**
+ * Source distance, in metres, for the preview pass that runs before the real
+ * one; zero skips it. The preview covers the whole disc from the start, at the
+ * price of about a decibel and a tenth of the area landing in a neighbouring
+ * band — the far sources it drops are what make the exact pass slow.
+ *
+ * Measured on Tverskaya: 150 m instead of 350 takes propagation from 926 s to
+ * 97 s, so a waiting caller sees a complete map after roughly two and a half
+ * minutes instead of a quarter of an hour. The honest result costs ~12% more
+ * wall clock for it, and only when somebody is actually watching: prewarming
+ * runs without this, as it does without frames.
+ *
+ * Not part of JOB_PARAMS for the same reason as the frames — the cached result
+ * is the exact one either way.
+ */
+export const PREVIEW_SRC_DIST = Number(process.env.PREVIEW_SRC_DIST ?? 150);
 
 /**
  * How long a cancelled pipeline gets to exit on its own before it is killed
@@ -164,6 +185,7 @@ export type Stage =
   | 'overpass'
   | 'import'
   | 'grid'
+  | 'preview'
   | 'propagation'
   | 'isosurface'
   | 'dissolve'
@@ -190,6 +212,7 @@ export const STAGE_LABELS: Record<Stage, string> = {
   overpass: 'Загружаю здания и дороги',
   import: 'Разбираю данные OpenStreetMap',
   grid: 'Строю сетку приёмников',
+  preview: 'Считаю предварительную карту',
   propagation: 'Считаю распространение звука',
   isosurface: 'Строю изофоны',
   dissolve: 'Склеиваю контуры',

@@ -121,7 +121,15 @@ The full annotated list is in the README under "Грабли". The ones that bit
   nested-loop scan. Both were measured the hard way.
 - **Diffraction is off by default.** Without it a courtyard scores the same as the
   street, and the map degrades into "distance from the nearest road".
-- `confMaxSrcDist` defaults to 150 m — distant main roads silently drop out.
+- `confMaxSrcDist` defaults to 150 m — distant main roads silently drop out. It is
+  also the only knob that makes propagation dramatically cheaper: dropping it from
+  350 m to 150 m took a Tverskaya run from ~910 s to 135 s, at the price of 9.9% of
+  the area moving a band and the whole map reading 1.1 dB low.
+- **`maxArea` is not a throttle on urban geometry.** Multiplying it by eight
+  changed the receiver count by 1.3% (34 101 → 33 666) and the runtime not at all:
+  `Delaunay_Grid` builds its mesh from building and road outlines, and the area cap
+  almost never binds where there is anything to compute. Measured, after it was
+  proposed as the basis of a cheap rough prepass.
 - Results come out in a metric projection; the web needs `Change_SRID` to 4326.
 - `CREATE TABLE AS SELECT` leaves columns nullable in H2 and a primary key will not
   accept them — `SET NOT NULL` first.
@@ -170,7 +178,36 @@ reporting itself through an `@@ERROR` marker that the server shows as-is.
   have prevented this, but the directory doubles as a cache: the OSM extract and
   the DEM raster are reused by later runs of the same point.
 
+## The preview pass
+
+Before the real propagation, the pipeline runs a cheap one — same receiver mesh,
+same buildings, sources within `PREVIEW_SRC_DIST` metres and no terrain — and
+exports it as `jobs/<id>/preview.geojson`. That is what a waiting caller sees:
+the whole disc after ~2 minutes instead of a quarter of it after ten.
+
+- **Source distance is the only real cost lever.** 350 m → 150 m took Tverskaya
+  propagation from 926 s to 97 s. Terrain is second (926 → 575 s) and `maxArea`
+  is not a lever at all — see the NoiseModelling rakes above.
+- **Terrain stays out of the preview.** With it the pass costs 160 s instead of
+  97 and lands no closer to the answer (10.2% of the area in a neighbouring band
+  against 9.9%): dropping terrain raises levels, dropping far sources lowers
+  them, and the two errors partly cancel.
+- **One mesh for both passes.** The isophone geometry then matches, so the exact
+  result recolours the map in place instead of redrawing it. Do not "optimise"
+  the preview by giving it its own grid.
+- **The preview must be dropped before the real pass**, tables and all
+  (`RECEIVERS_LEVEL`, `CONTOURING_NOISE_MAP`): the blocks append to whatever
+  they find rather than replacing it.
+- **Never cached, always labelled.** It reads about a decibel low; the interface
+  says so, and `/api/noise/:id/preview` sends `Cache-Control: no-store`.
+
 ## Partial frames
+
+Off by default (`PARTIAL_INTERVAL_MS=0`) since the preview arrived: a frame is
+exact but covers a quarter of the disc, and **a frame must never replace the
+preview** — on screen the map would appear to fall apart. The client enforces
+that rule; the code below stays for the day delta frames make a second-by-second
+render possible.
 
 While a job runs, the pipeline exports the map as it stands into
 `jobs/<id>/partial-N.geojson` and the server announces each one through the

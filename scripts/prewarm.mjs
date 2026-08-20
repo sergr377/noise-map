@@ -96,7 +96,13 @@ for (const target of targets) {
   const started = Date.now();
   process.stdout.write(`${target.name.padEnd(30)} `);
   try {
-    const created = await postJson('/api/noise', { lat: target.lat, lon: target.lon });
+    // Без предварительной карты: её никто не увидит, а стоит она 12–22%
+    // времени расчёта. Прогрев ждёт результат, а не картинку.
+    const created = await postJson('/api/noise', {
+      lat: target.lat,
+      lon: target.lon,
+      preview: false,
+    });
     if (created.body.cached) {
       already += 1;
       console.log(`уже в кэше (${(created.body.bytes / 1024).toFixed(0)} КБ)`);

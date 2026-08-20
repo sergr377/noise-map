@@ -165,9 +165,12 @@ function parseArgs(argv) {
     rail: 0,
     trainsPerHour: 4,
     // How often the pipeline exports a partial map while it is still computing.
-    // Off by default: a direct CLI run wants the result, not frames — the server
-    // switches this on because there someone is watching an empty map.
+    // Off by default: a direct CLI run wants the result, not frames.
     partialIntervalMs: 0,
+    // Source distance for the preview pass, in metres; 0 skips it. The server
+    // switches it on because there someone is watching an empty map — a direct
+    // CLI run wants the answer, and a preview would only delay it.
+    previewSrcDist: 0,
   };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].replace(/^--/, '');
@@ -179,7 +182,35 @@ function parseArgs(argv) {
   return out;
 }
 
-function runScriptRunner(jobDir, paramsPath) {
+/**
+ * Trims exported coordinates in place, and reports what that saved.
+ *
+ * The exporter writes full double precision — 14 decimal places, i.e.
+ * nanometres. Six decimals is ~0.1 m at this latitude, far finer than the
+ * model's accuracy, and drops roughly half the bytes on its own. The preview
+ * gets the same treatment: it travels the same wire to the same map.
+ */
+async function roundCoordinates(file, decimals) {
+  const before = (await stat(file)).size;
+  const gj = JSON.parse(await readFile(file, 'utf8'));
+  const factor = 10 ** decimals;
+  const round = (c) => {
+    if (typeof c[0] === 'number') {
+      c[0] = Math.round(c[0] * factor) / factor;
+      c[1] = Math.round(c[1] * factor) / factor;
+      if (c.length > 2) c.length = 2;
+    } else {
+      c.forEach(round);
+    }
+  };
+  for (const feat of gj.features) {
+    if (feat.geometry) round(feat.geometry.coordinates);
+  }
+  await writeFile(file, JSON.stringify(gj), 'utf8');
+  return { before, after: (await stat(file)).size, features: gj.features.length };
+}
+
+function runScriptRunner(jobDir, paramsPath, withPreview) {
   // The distribution ships both launchers; the .bat one does not exist in a
   // Linux container, where the deployment runs.
   const runner = path.join(
@@ -196,10 +227,14 @@ function runScriptRunner(jobDir, paramsPath) {
       // runs directly, which also avoids shell quoting of the paths.
       shell: process.platform === 'win32',
     });
-    // Which stage begins once a given block reports completion.
+    // Which stage begins once a given block reports completion. The preview
+    // pass sits between the grid and the real propagation and reports its cells
+    // exactly as the real one does — hence a stage of its own, so that a bar
+    // which filled once does not start over without explanation.
     const nextStage = {
       Import_OSM: 'grid',
-      Delaunay_Grid: 'propagation',
+      Delaunay_Grid: withPreview ? 'preview' : 'propagation',
+      Preview: 'propagation',
       Noise_level_from_traffic: 'isosurface',
       Create_Isosurface: 'dissolve',
       Dissolve: 'export',
@@ -225,6 +260,24 @@ function runScriptRunner(jobDir, paramsPath) {
         // mangled and unopenable. The name itself is always ASCII.
         const partial = line.match(/\[PARTIAL\].*?(partial-\d+\.geojson)/);
         if (partial) emit('PARTIAL', path.join(jobDir, partial[1]));
+
+        // The rough map of the whole area, exported before the real pass starts.
+        // The path is known here and is not read back out of the log, for the
+        // same encoding reason as above.
+        if (line.includes('[PREVIEW]')) {
+          // Announced only once it is trimmed: untrimmed it is two thirds
+          // bigger, for precision no map can show. Trimming is a saving rather
+          // than a requirement, so a failure still announces the map.
+          void roundCoordinates(previewFile, args.coordDecimals)
+            .then((sizes) => {
+              console.log(
+                `  preview: ${(sizes.before / 1024).toFixed(0)} KB -> ` +
+                  `${(sizes.after / 1024).toFixed(0)} KB, ${sizes.features} контуров`,
+              );
+            })
+            .catch((err) => console.log(`  preview: округление не удалось (${err.message})`))
+            .finally(() => emit('PREVIEW', previewFile));
+        }
 
         if (/\[TIMING\]|\[PARTIAL\]|ERROR|Exception|isosurface|Export/i.test(line)) {
           console.log('  ' + line.slice(0, 200));
@@ -263,6 +316,7 @@ const fenceWkt = bboxEwkt(bboxAround(args.lat, args.lon, args.radius));
 const srid = utmSrid(args.lat, args.lon);
 const osmFile = path.join(jobDir, 'extract.osm');
 const outFile = path.join(jobDir, 'isophones.geojson');
+const previewFile = path.join(jobDir, 'preview.geojson');
 
 console.log(
   `job ${jobId}  srid EPSG:${srid}  receivers r=${args.radius}m  sources r=${srcRadius}m  maxSrcDist=${args.maxSrcDist}m`,
@@ -343,6 +397,8 @@ await writeFile(
       centreLon: args.lon,
       radius: args.radius,
       partialIntervalMs: args.partialIntervalMs,
+      previewFile,
+      previewSrcDist: args.previewSrcDist,
       demFile: demInfo ? demFile : '',
       // An empty geometry file would make the rail pass do a full propagation
       // run for nothing, so a location without surface track skips it entirely.
@@ -365,35 +421,16 @@ await writeFile(
   'utf8',
 );
 
-await runScriptRunner(jobDir, paramsPath);
+await runScriptRunner(jobDir, paramsPath, args.previewSrcDist > 0);
 const tNm = Date.now();
 
 console.log(`  noisemodelling: ${((tNm - tOsm) / 1000).toFixed(1)}s`);
 
-// The exporter writes full double precision — 14 decimal places, i.e. nanometres.
-// Six decimals is ~0.1 m at this latitude, far finer than the model's accuracy,
-// and drops roughly half the bytes on its own.
-const rawSize = (await stat(outFile)).size;
-const gj = JSON.parse(await readFile(outFile, 'utf8'));
-const factor = 10 ** args.coordDecimals;
-const roundCoords = (c) => {
-  if (typeof c[0] === 'number') {
-    c[0] = Math.round(c[0] * factor) / factor;
-    c[1] = Math.round(c[1] * factor) / factor;
-    if (c.length > 2) c.length = 2;
-  } else {
-    c.forEach(roundCoords);
-  }
-};
-for (const feat of gj.features) {
-  if (feat.geometry) roundCoords(feat.geometry.coordinates);
-}
-await writeFile(outFile, JSON.stringify(gj), 'utf8');
-const finalSize = (await stat(outFile)).size;
+const sizes = await roundCoordinates(outFile, args.coordDecimals);
 
 console.log(
-  `  output: ${(rawSize / 1024).toFixed(0)} KB -> ${(finalSize / 1024).toFixed(0)} KB ` +
-    `after rounding (${gj.features.length} features)`,
+  `  output: ${(sizes.before / 1024).toFixed(0)} KB -> ${(sizes.after / 1024).toFixed(0)} KB ` +
+    `after rounding (${sizes.features} features)`,
 );
 console.log(`  ${outFile}`);
 console.log(`TOTAL ${((Date.now() - t0) / 1000).toFixed(1)}s`);

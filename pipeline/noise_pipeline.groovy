@@ -331,7 +331,59 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
         noiseInputs['tableDEM'] = 'DEM'
     }
 
+    // 3a. Предварительная карта: вся площадь сразу, пока точный расчёт заполнял
+    //     бы её ячейками четверть часа. Считается по той же сетке приёмников и
+    //     тем же зданиям, отличаясь двумя вещами: источники берутся в пределах
+    //     previewSrcDist, и рельеф не участвует.
+    //
+    //     Всё это меряно на Тверской, радиус 750 м:
+    //       - maxSrcDist 350 -> 150 м: распространение 926 -> 97 с. Это
+    //         единственный настоящий рычаг цены; ослаблять вместо него maxArea
+    //         бесполезно — на городской застройке сетку Делоне задают контуры
+    //         зданий, и восьмикратный предел площади убрал 1.3% приёмников;
+    //       - рельеф в предпросмотре не окупается: с ним проход стоит 160 с
+    //         вместо 97, а расхождение с итогом не уменьшается (10.2% площади
+    //         против 9.9%). Без рельефа уровни завышаются, отброшенные дальние
+    //         источники их занижают, и ошибки частично гасят друг друга.
+    //
+    //     Итог расходится с предпросмотром на ~1 дБ(A) и десятую часть площади
+    //     по полосам — поэтому он и предварительный. Сетка при этом одна на оба
+    //     прохода не случайно: геометрия изофон совпадает, и точный расчёт не
+    //     перерисовывает карту, а перекрашивает её на месте.
+    int previewSrcDist = (p.previewSrcDist ?: 0) as Integer
+    if (previewSrcDist > 0 && previewSrcDist < (p.maxSrcDist as Double)) {
+        long previewStart = System.currentTimeMillis()
+        def previewInputs = new LinkedHashMap(noiseInputs)
+        previewInputs['confMaxSrcDist'] = previewSrcDist as Double
+        previewInputs.remove('tableDEM')
+        // Свой прогресс предпрогона в общий поток не идёт: HTTP-слой считает
+        // шкалу по строкам об ячейках, которые блок печатает сам, и держит для
+        // предпрогона отдельную стадию.
+        new Noise_level_from_traffic().exec(connection, previewInputs, new EmptyProgressVisitor())
+        new Create_Isosurface().exec(connection, [
+                resultTable      : 'RECEIVERS_LEVEL',
+                resultTableField : 'LAEQ',
+                isoClass         : p.isoClass as String,
+                smoothCoefficient: 1.0d
+        ], new EmptyProgressVisitor())
+        // Тот же путь склейки, что у итога и у кадров: предпросмотр отличается
+        // от результата дальностью источников, а не способом рисования.
+        def previewStats = dissolveClipExport(connection, p, 'CONTOURING_NOISE_MAP',
+                'CONTOURING_PREVIEW_DISSOLVED', p.previewFile as String)
+        logger.info('[PREVIEW] {} ({} контуров, {} мс)', p.previewFile as String,
+                previewStats.after, System.currentTimeMillis() - previewStart)
+
+        // Точный проход пишет в те же имена. Блоки чужие таблицы не чистят, а
+        // дополняют, так что остатки предпрогона иначе попали бы в итог.
+        sql.execute('DROP TABLE IF EXISTS CONTOURING_PREVIEW_DISSOLVED')
+        sql.execute('DROP TABLE IF EXISTS CONTOURING_NOISE_MAP')
+        sql.execute('DROP TABLE IF EXISTS RECEIVERS_LEVEL')
+        stamp('Preview')
+    }
+
     // Живой рендер: кадры строятся, пока идёт распространение. Ноль выключает.
+    // По умолчанию выключен: предпросмотр выше показывает всю площадь сразу, а
+    // кадр — точную, но малую часть, и подменять им готовую карту нельзя.
     int partialIntervalMs = (p.partialIntervalMs ?: 0) as Integer
     AtomicBoolean stopWatcher = new AtomicBoolean(false)
     Thread watcher = partialIntervalMs > 0

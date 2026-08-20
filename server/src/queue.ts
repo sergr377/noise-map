@@ -4,6 +4,7 @@ import {
   JOB_PARAMS,
   KILL_GRACE_MS,
   PARTIAL_INTERVAL_MS,
+  PREVIEW_SRC_DIST,
   MAX_CONCURRENT_JOBS,
   RUN_JOB_SCRIPT,
   ROOT,
@@ -29,6 +30,11 @@ export interface JobState {
    * stream would push megabytes through a channel meant for status lines.
    */
   partials?: number;
+  /**
+   * Whether the rough map of the whole area is ready at /api/noise/:id/preview.
+   * One map rather than a series, so this is a flag and not a counter.
+   */
+  preview?: boolean;
 }
 
 /**
@@ -41,7 +47,8 @@ const STAGE_SPAN: Partial<Record<Stage, [number, number]>> = {
   overpass: [0, 0.1],
   import: [0.1, 0.15],
   grid: [0.15, 0.18],
-  propagation: [0.18, 0.92],
+  preview: [0.18, 0.28],
+  propagation: [0.28, 0.92],
   isosurface: [0.92, 0.96],
   dissolve: [0.96, 0.98],
   export: [0.98, 1],
@@ -72,6 +79,13 @@ interface Job {
   child: ChildProcess | null;
   /** Exported partial maps, oldest first. Files live in the job directory. */
   partials: string[];
+  /** The rough whole-area map, once the preview pass has written it. */
+  preview: string | null;
+  /**
+   * Whether this job computes one at all. Off for work nobody is watching —
+   * prewarming pays 12–22% for a map that would be deleted unseen.
+   */
+  wantsPreview: boolean;
   /**
    * Whether a repeat request should start over instead of being handed this
    * failure again. True when the job died of something that has nothing to do
@@ -94,6 +108,7 @@ function snapshot(job: Job): JobState {
     ...(job.error ? { error: job.error } : {}),
     ...(job.bytes ? { bytes: job.bytes } : {}),
     ...(job.partials.length ? { partials: job.partials.length } : {}),
+    ...(job.preview ? { preview: true } : {}),
   };
 }
 
@@ -175,6 +190,8 @@ function runPipeline(job: Job): Promise<void> {
       // result.
       '--partialIntervalMs',
       String(PARTIAL_INTERVAL_MS),
+      '--previewSrcDist',
+      String(job.wantsPreview ? PREVIEW_SRC_DIST : 0),
     ];
     // detached: the child becomes its own process-group leader, which is what
     // makes killTree able to signal the JVM underneath it. The price is that it
@@ -204,7 +221,10 @@ function runPipeline(job: Job): Promise<void> {
         setStage(job, payload.trim() as Stage);
       } else if (kind === 'PROGRESS') {
         const [doneCells, totalCells] = payload.trim().split(/\s+/).map(Number);
-        const span = STAGE_SPAN.propagation!;
+        // Both propagation passes report cells, so the span is the one of the
+        // stage that is running — otherwise the preview would drive the bar
+        // through the whole propagation band and then start it over.
+        const span = STAGE_SPAN[job.stage] ?? STAGE_SPAN.propagation!;
         if (totalCells && doneCells !== undefined) {
           job.progress = span[0] + (span[1] - span[0]) * (doneCells / totalCells);
           publish(job);
@@ -213,6 +233,11 @@ function runPipeline(job: Job): Promise<void> {
         resultPath = payload.trim();
       } else if (kind === 'ERROR') {
         pipelineError = payload.trim();
+      } else if (kind === 'PREVIEW') {
+        // The whole area at once, roughly. Announced like a frame, but it
+        // arrives once and is not replaced by anything except the result.
+        job.preview = payload.trim();
+        publish(job);
       } else if (kind === 'PARTIAL') {
         // A map of everything computed so far. Publishing here is what tells a
         // watching client that a new frame is worth fetching.
@@ -274,7 +299,7 @@ function runPipeline(job: Job): Promise<void> {
  * Returns the job for this location, starting one only if nothing equivalent is
  * already in flight. Two users clicking the same block share a single run.
  */
-export function startJob(lat: number, lon: number): Job {
+export function startJob(lat: number, lon: number, wantsPreview = true): Job {
   const id = cacheKey(lat, lon);
   const existing = jobs.get(id);
   const spent = existing?.stage === 'cancelled' || (existing?.stage === 'error' && existing.retryable);
@@ -306,6 +331,8 @@ export function startJob(lat: number, lon: number): Job {
     cancelled: false,
     child: null,
     partials: [],
+    preview: null,
+    wantsPreview,
     retryable: false,
   };
   jobs.set(id, job);
@@ -393,6 +420,11 @@ export function getJob(id: string): Job | undefined {
   return jobs.get(id);
 }
 
+/** Path of the rough whole-area map, while the job that made it is alive. */
+export function previewPath(id: string): string | undefined {
+  return jobs.get(id)?.preview ?? undefined;
+}
+
 /** Path of the n-th partial map (1-based), while the job that made it is alive. */
 export function partialPath(id: string, index: number): string | undefined {
   return jobs.get(id)?.partials[index - 1];
@@ -404,7 +436,12 @@ export function partialPath(id: string, index: number): string | undefined {
  * keeps a cancelled or finished run from leaving megabytes behind.
  */
 function removePartials(job: Job) {
-  for (const file of job.partials.splice(0)) {
+  const scratch = job.partials.splice(0);
+  if (job.preview) {
+    scratch.push(job.preview);
+    job.preview = null;
+  }
+  for (const file of scratch) {
     void unlink(file).catch(() => {
       /* already gone, or never written */
     });

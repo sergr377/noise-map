@@ -15,7 +15,16 @@ import {
   WEB_DIST,
 } from './config.js';
 import { cacheKey, quantize, readCache, cacheSize } from './cache.js';
-import { startJob, getJob, subscribe, snapshot, cancelJob, stopAll, partialPath } from './queue.js';
+import {
+  startJob,
+  getJob,
+  subscribe,
+  snapshot,
+  cancelJob,
+  stopAll,
+  partialPath,
+  previewPath,
+} from './queue.js';
 import { geocode, GeocoderError } from './geocode.js';
 import { clientIp, limitHeaders, openStream, take, type Verdict } from './ratelimit.js';
 
@@ -105,7 +114,9 @@ async function handleProbe(res: http.ServerResponse, params: URLSearchParams) {
 
 /** POST /api/noise — resolve a click to either a cached result or a running job. */
 async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse, ip: string) {
-  const body = (await readBody(req)) as { lat?: unknown; lon?: unknown } | null;
+  const body = (await readBody(req)) as
+    | { lat?: unknown; lon?: unknown; preview?: unknown }
+    | null;
   const point = readPoint(body?.lat, body?.lon);
 
   if (!point) {
@@ -150,7 +161,10 @@ async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse,
     }
   }
 
-  const job = startJob(lat, lon);
+  // Opting out of the preview is for callers that are not watching — the cache
+  // warmer above all. Honoured from anyone: it only makes the machine do less
+  // work, at the price of the caller seeing nothing until the result.
+  const job = startJob(lat, lon, body?.preview !== false);
   return sendJson(res, 202, { id: job.id, cached: false, centre, radius, state: snapshot(job) });
 }
 
@@ -284,7 +298,29 @@ async function handlePartial(
   if (!data) {
     return sendJson(res, 404, { error: 'нет такого промежуточного кадра' });
   }
+  return sendScratchMap(req, res, data);
+}
 
+/**
+ * GET /api/noise/:id/preview — the rough map of the whole area, computed before
+ * the real pass with only nearby sources.
+ *
+ * Never cached, for the same reason a frame is not: it reads about a decibel
+ * low and a tenth of its area sits in a neighbouring band. That is fine for
+ * something the interface labels as preliminary and wrong for something handed
+ * out as the answer.
+ */
+async function handlePreview(req: http.IncomingMessage, res: http.ServerResponse, id: string) {
+  const file = previewPath(id);
+  const data = file ? await readFile(file).catch(() => null) : null;
+  if (!data) {
+    return sendJson(res, 404, { error: 'предварительной карты для этой задачи нет' });
+  }
+  return sendScratchMap(req, res, data);
+}
+
+/** Shared tail of the two routes above: same headers, same gzip decision. */
+async function sendScratchMap(req: http.IncomingMessage, res: http.ServerResponse, data: Buffer) {
   const headers: Record<string, string> = {
     'Content-Type': 'application/geo+json; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -426,6 +462,11 @@ const server = http.createServer(async (req, res) => {
     const cancel = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})$/);
     if (cancel && req.method === 'DELETE') {
       return handleCancel(res, cancel[1] as string);
+    }
+
+    const preview = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/preview$/);
+    if (preview && req.method === 'GET') {
+      return await handlePreview(req, res, preview[1] as string);
     }
 
     const frame = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/partial\/(\d{1,4})$/);
