@@ -88,6 +88,25 @@ export async function fetchConfig(): Promise<ServiceConfig> {
   return asJson<ServiceConfig>(await fetch('/api/config'));
 }
 
+export interface ProbeResponse {
+  id: string;
+  centre: Centre;
+  radius: number;
+  cached: boolean;
+  bytes?: number;
+  /** Present only while a calculation for this place is alive. */
+  state?: JobState;
+}
+
+/**
+ * Asks whether a place has been computed. Unlike requestNoise this starts
+ * nothing — it exists so the map can tell instant places from ones that would
+ * cost minutes, without costing those minutes to find out.
+ */
+export async function probeNoise(lat: number, lon: number): Promise<ProbeResponse> {
+  return asJson<ProbeResponse>(await fetch(`/api/noise?lat=${lat}&lon=${lon}`));
+}
+
 export async function requestNoise(lat: number, lon: number): Promise<CreateResponse> {
   return asJson<CreateResponse>(
     await fetch('/api/noise', {

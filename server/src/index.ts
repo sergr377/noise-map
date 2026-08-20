@@ -63,15 +63,55 @@ async function readBody(req: http.IncomingMessage): Promise<unknown> {
   }
 }
 
+/** A point on Earth, or null if the caller sent something else. */
+function readPoint(rawLat: unknown, rawLon: unknown): { lat: number; lon: number } | null {
+  const lat = Number(rawLat);
+  const lon = Number(rawLon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return { lat, lon };
+}
+
+/**
+ * GET /api/noise?lat=&lon= — has this place been computed, and is anything being
+ * computed for it right now.
+ *
+ * Exists because POST cannot answer that without also starting the work: asking
+ * "is this ready?" used to cost minutes of every core, which is both a way to
+ * occupy the machine by accident and the reason the map could not show which
+ * places open instantly. Nothing here starts, joins or changes a job.
+ */
+async function handleProbe(res: http.ServerResponse, params: URLSearchParams) {
+  const point = readPoint(params.get('lat'), params.get('lon'));
+  if (!point) {
+    return sendJson(res, 400, { error: 'lat and lon must be valid coordinates' });
+  }
+
+  const id = cacheKey(point.lat, point.lon);
+  const bytes = await cacheSize(id);
+  const job = getJob(id);
+
+  return sendJson(res, 200, {
+    id,
+    centre: quantize(point.lat, point.lon),
+    radius: JOB_PARAMS.radius,
+    cached: bytes !== null,
+    ...(bytes !== null ? { bytes } : {}),
+    // Present only while a calculation for this cell is alive, so a caller can
+    // tell "nobody has asked for this" from "somebody is already waiting".
+    ...(job ? { state: snapshot(job) } : {}),
+  });
+}
+
 /** POST /api/noise — resolve a click to either a cached result or a running job. */
 async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse, ip: string) {
   const body = (await readBody(req)) as { lat?: unknown; lon?: unknown } | null;
-  const lat = Number(body?.lat);
-  const lon = Number(body?.lon);
+  const point = readPoint(body?.lat, body?.lon);
 
-  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+  if (!point) {
     return sendJson(res, 400, { error: 'lat and lon must be valid coordinates' });
   }
+  const { lat, lon } = point;
 
   const id = cacheKey(lat, lon);
   // Where the map is actually centred. Clicks snap to a grid, so this can sit
@@ -358,6 +398,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/noise' && req.method === 'POST') {
       return await handleCreate(req, res, ip);
+    }
+    if (url.pathname === '/api/noise' && req.method === 'GET') {
+      return await handleProbe(res, url.searchParams);
     }
     if (url.pathname === '/api/geocode' && req.method === 'GET') {
       return await handleGeocode(res, url.searchParams.get('q') ?? '', ip);

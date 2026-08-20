@@ -9,6 +9,7 @@ import {
   fetchConfig,
   fetchPartial,
   fetchResult,
+  probeNoise,
   followJob,
   geocode,
   JobCancelled,
@@ -87,31 +88,55 @@ const PERIODS: Array<{ id: Period; label: string; hint: string }> = [
   { id: 'DEN', label: 'Lden', hint: 'сводный' },
 ];
 
+/**
+ * Period from the link. Sharing night noise and having the recipient open Lden
+ * makes the link say something other than what was shown.
+ */
+function readPeriodFromUrl(): Period | null {
+  const raw = new URLSearchParams(window.location.search).get('period');
+  return PERIODS.some((p) => p.id === raw) ? (raw as Period) : null;
+}
+
 /** How far the bar may drift past the last confirmed value, and how fast. */
 const DRIFT_LIMIT = 0.05;
 const DRIFT_PER_SECOND = 0.004;
 
 /**
- * Seconds since the calculation started, counted locally.
+ * How long the calculation has been running, in seconds.
  *
- * The server's own elapsed figure only arrives with a progress event, and those
- * are tens of seconds apart — so the readout used to sit frozen on the same
- * number while the bar was also capped, and the whole thing looked hung. A
- * counter that keeps ticking is what tells the user the job is alive.
+ * Counted locally because the server's own figure only arrives with an event,
+ * and those are tens of seconds apart — a readout frozen between them looks
+ * like a hang. But the local clock alone measures *our* wait, not the job's
+ * age: joining a calculation someone else started, or simply reloading the
+ * page, would restart it from zero and under-report by minutes. So every
+ * reported figure re-anchors the count, and the ticking fills the silences —
+ * including the long silence of a job sitting in the queue, where the server
+ * has nothing new to say.
  */
-function useElapsedSeconds(running: boolean): number {
+function useElapsedSeconds(running: boolean, reported?: number): number {
   const [seconds, setSeconds] = useState(0);
+  // Where the count is measured from, in local time. A reported elapsed of 90 s
+  // means the job began 90 s before that report reached us.
+  const originRef = useRef(Date.now());
+
+  useEffect(() => {
+    if (!running) originRef.current = Date.now();
+  }, [running]);
+
+  useEffect(() => {
+    if (reported !== undefined) originRef.current = Date.now() - reported;
+  }, [reported]);
 
   useEffect(() => {
     if (!running) {
       setSeconds(0);
       return;
     }
-    const startedAt = Date.now();
-    setSeconds(0);
-    const timer = setInterval(() => setSeconds(Math.round((Date.now() - startedAt) / 1000)), 1000);
+    const tick = () => setSeconds(Math.max(0, Math.round((Date.now() - originRef.current) / 1000)));
+    tick();
+    const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
-  }, [running]);
+  }, [running, reported]);
 
   return seconds;
 }
@@ -171,8 +196,13 @@ export default function App() {
   const [radius, setRadius] = useState<number | null>(null);
   /** Where the cursor is over the map, for the ring that previews a click. */
   const [hover, setHover] = useState<Centre | null>(null);
+  /** Whether the place under the cursor is already computed and opens instantly. */
+  const [hoverCached, setHoverCached] = useState(false);
+  // Answers already received, so passing over the same block twice is free. The
+  // key is deliberately coarse — about the size of a cache cell.
+  const probed = useRef(new Map<string, boolean>());
 
-  const [period, setPeriod] = useState<Period>('DEN');
+  const [period, setPeriod] = useState<Period>(() => readPeriodFromUrl() ?? 'DEN');
   const [data, setData] = useState<IsophoneCollection | null>(null);
   /**
    * The map as it stands mid-calculation. Rendered exactly like the final one —
@@ -234,6 +264,15 @@ export default function App() {
     busyRef.current = busy;
   }, [busy]);
 
+  // A bare visit keeps its bare URL: the parameter appears once there is a point
+  // to look at, or once the period stops being the default one.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('lat') && period === 'DEN') return;
+    url.searchParams.set('period', period);
+    window.history.replaceState(null, '', url);
+  }, [period]);
+
   useEffect(() => {
     let cancelled = false;
     // A failure here costs the preview ring and nothing else, so it stays
@@ -248,8 +287,40 @@ export default function App() {
     };
   }, []);
 
+  /**
+   * Asks the server whether the place under the cursor is already computed, but
+   * only once the cursor stops: a request per mouse move would spend the whole
+   * per-address budget on hovering. Answers are remembered, and a failure just
+   * leaves the ring in its default state.
+   */
+  useEffect(() => {
+    if (!hover || busy) {
+      setHoverCached(false);
+      return;
+    }
+    const key = `${hover.lat.toFixed(3)},${hover.lon.toFixed(3)}`;
+    const known = probed.current.get(key);
+    if (known !== undefined) {
+      setHoverCached(known);
+      return;
+    }
+    let dropped = false;
+    const timer = setTimeout(() => {
+      void probeNoise(hover.lat, hover.lon)
+        .then((probe) => {
+          probed.current.set(key, probe.cached);
+          if (!dropped) setHoverCached(probe.cached);
+        })
+        .catch(() => {});
+    }, 400);
+    return () => {
+      dropped = true;
+      clearTimeout(timer);
+    };
+  }, [hover, busy]);
+
   const smoothed = useSmoothProgress(job?.progress ?? 0, busy && !fromCache);
-  const elapsed = useElapsedSeconds(busy && !fromCache);
+  const elapsed = useElapsedSeconds(busy && !fromCache, job?.elapsedMs);
 
   const handlePick = useCallback(
     async (lat: number, lon: number, source: 'map' | 'search' | 'link' = 'map') => {
@@ -439,6 +510,7 @@ export default function App() {
           centre={centre}
           radius={radius}
           hover={hover}
+          hoverCached={hoverCached}
           running={busy && !fromCache}
           onPick={handlePick}
           onHover={setHover}
@@ -483,6 +555,10 @@ export default function App() {
             {searching ? '…' : 'Найти'}
           </button>
         </form>
+
+        {hoverCached && !busy && (
+          <p className="note">Под курсором уже посчитанное место — откроется сразу.</p>
+        )}
 
         {searchError && <p className="error">Поиск не сработал: {searchError}</p>}
 

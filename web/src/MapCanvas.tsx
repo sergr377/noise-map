@@ -25,6 +25,8 @@ interface Props {
   radius: number | null;
   /** Where the cursor is, when it is over the map and nothing is running. */
   hover: Centre | null;
+  /** Whether that place is already computed — a click there costs nothing. */
+  hoverCached: boolean;
   /** Whether a calculation is in flight — that is what turns the ring solid. */
   running: boolean;
   onPick: (lat: number, lon: number) => void;
@@ -58,6 +60,7 @@ export default function MapCanvas({
   centre,
   radius,
   hover,
+  hoverCached,
   running,
   onPick,
   onHover,
@@ -133,7 +136,11 @@ export default function MapCanvas({
         <YMapFeature
           geometry={{ type: 'Polygon', coordinates: [preview] }}
           style={{
-            fill: 'rgba(0, 0, 0, 0)',
+            // An already computed place is drawn filled: the click costs
+            // nothing there, and that is worth seeing before clicking rather
+            // than after waiting.
+            fill: hoverCached ? ACCENT : 'rgba(0, 0, 0, 0)',
+            fillOpacity: hoverCached ? 0.12 : 0,
             stroke: [{ color: ACCENT, width: 2, opacity: 0.75, dash: [8, 7] }],
             zIndex: 500,
           }}
