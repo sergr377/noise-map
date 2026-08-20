@@ -17,7 +17,7 @@ import {
 import { cacheKey, quantize, readCache, cacheSize } from './cache.js';
 import { startJob, getJob, subscribe, snapshot, cancelJob, stopAll, partialPath } from './queue.js';
 import { geocode, GeocoderError } from './geocode.js';
-import { clientIp, limitHeaders, take, type Verdict } from './ratelimit.js';
+import { clientIp, limitHeaders, openStream, take, type Verdict } from './ratelimit.js';
 
 const gzipAsync = promisify(gzip);
 
@@ -170,10 +170,23 @@ function handleCancel(res: http.ServerResponse, id: string) {
 }
 
 /** GET /api/noise/:id/events — progress as server-sent events. */
-function handleEvents(res: http.ServerResponse, id: string) {
+function handleEvents(res: http.ServerResponse, id: string, ip: string) {
   const job = getJob(id);
   if (!job) {
     return sendJson(res, 404, { error: 'unknown job — it may have finished; fetch the result' });
+  }
+
+  // What has to be metered here is occupancy, not rate: the connection stays
+  // open for the whole calculation, holding a socket, a listener and a timer,
+  // and the request budget spent to open it was one token. Nothing else would
+  // stop a client from leaving a hundred of these hanging.
+  const stream = openStream(ip);
+  if (!stream.ok) {
+    return sendJson(res, 429, {
+      error:
+        `слишком много одновременных подписок на прогресс с этого адреса ` +
+        `(${stream.limit}) — закройте лишние вкладки`,
+    });
   }
 
   res.writeHead(200, {
@@ -203,6 +216,7 @@ function handleEvents(res: http.ServerResponse, id: string) {
     finished = true;
     unsubscribe?.();
     clearInterval(heartbeat);
+    stream.release();
     if (!res.writableEnded) res.end();
   };
 
@@ -215,9 +229,12 @@ function handleEvents(res: http.ServerResponse, id: string) {
   // The listener already fired and closed the stream; drop the now-known handle.
   if (finished) unsubscribe();
 
+  // Fires however the connection ends — a closed tab, a dropped network, our
+  // own end() above — which is what makes the slot come back at all.
   res.on('close', () => {
     unsubscribe?.();
     clearInterval(heartbeat);
+    stream.release();
   });
 }
 
@@ -419,7 +436,7 @@ const server = http.createServer(async (req, res) => {
     const match = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/(events|result)$/);
     if (match && req.method === 'GET') {
       const [, id, kind] = match as unknown as [string, string, string];
-      return kind === 'events' ? handleEvents(res, id) : await handleResult(req, res, id);
+      return kind === 'events' ? handleEvents(res, id, ip) : await handleResult(req, res, id);
     }
 
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {

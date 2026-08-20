@@ -196,8 +196,17 @@ Token buckets per IP in `ratelimit.ts`: `job` (starting a calculation), `geocode
 only where new work would begin — not on a cache hit, not on joining a running
 job — and `/api/health` is not charged at all.
 
-Loopback is exempt so `prewarm.mjs` can run; set `RATE_LIMIT_LOOPBACK=1` to test
-the limits locally. `X-Forwarded-For` is read only under `TRUST_PROXY=1`, because
+Progress streams are metered separately, by **occupancy rather than rate**
+(`openStream`, capped by `STREAM_LIMIT_PER_IP`): an SSE connection holds a socket,
+a listener and a timer for the whole calculation, and opening it costs a single
+`api` token — so nothing in the buckets stops a client from leaving a hundred of
+them hanging. The slot is released from both the stream's own close path and the
+socket's `close` event, whichever comes first; **the release has to stay
+idempotent**, because the count is per address and a double release would hand
+back somebody else's slot.
+
+Loopback is exempt from all of it so `prewarm.mjs` can run; set
+`RATE_LIMIT_LOOPBACK=1` to test the limits locally. `X-Forwarded-For` is read only under `TRUST_PROXY=1`, because
 trusting it on a directly reachable server disables the limiter for anyone who
 sends the header.
 

@@ -136,6 +136,26 @@ const cancelTarget = await fetch(`${BASE}/api/noise`, {
 if (cancelTarget.cached) {
   console.log('cancel: пропущено — соседняя точка уже в кэше');
 } else {
+  // Пока задача ещё считается — сколько подписок на прогресс сервер позволяет
+  // держать открытыми одновременно. Это ограничение по занятости, а не по
+  // частоте: соединение живёт весь расчёт, а стоило одного токена бюджета.
+  const probes = [];
+  let refusedAt = 0;
+  for (let i = 1; i <= 10 && !refusedAt; i += 1) {
+    const res = await fetch(`${BASE}/api/noise/${cancelTarget.id}/events`);
+    if (res.status === 429) refusedAt = i;
+    else probes.push(res.body);
+  }
+  console.log(
+    refusedAt
+      ? `  одновременные подписки: отказ на ${refusedAt}-й с 429`
+      : '  одновременные подписки: десять прошло — адрес в исключениях (loopback) ' +
+          'или STREAM_LIMIT_PER_IP больше десяти',
+  );
+  // Слоты обязаны вернуться до проверки отмены ниже, иначе её поток откажут.
+  for (const body of probes) await body.cancel().catch(() => {});
+  await new Promise((r) => setTimeout(r, 200));
+
   // Стадия из SSE, а не из ответа на DELETE: важно именно то, что видит клиент,
   // который в этот момент следит за прогрессом.
   const events = await fetch(`${BASE}/api/noise/${cancelTarget.id}/events`);

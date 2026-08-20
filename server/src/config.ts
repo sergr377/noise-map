@@ -119,6 +119,18 @@ export const RATE_LIMITS = {
 export type LimitName = keyof typeof RATE_LIMITS;
 
 /**
+ * How many progress streams one address may hold open at once. Zero disables the
+ * check, as with the buckets above.
+ *
+ * Metered separately because it is occupancy, not rate: an SSE connection lives
+ * for as long as the calculation it follows, so the request limits above say
+ * nothing about it — a client can open a hundred within its budget and simply
+ * leave them there. Six is well past what honest use needs: a tab holds one
+ * stream, and only while it waits for a result.
+ */
+export const STREAM_LIMIT_PER_IP = Number(process.env.STREAM_LIMIT_PER_IP ?? 6);
+
+/**
  * Operating point chosen in benchmarking. See README for the accuracy/speed
  * trade-off behind each value; the current cost is ~830 s cold on Tverskaya,
  * of which ~790 s is propagation.
