@@ -70,20 +70,27 @@ export const PARTIAL_INTERVAL_MS = Number(process.env.PARTIAL_INTERVAL_MS ?? 0);
 
 /**
  * Source distance, in metres, for the preview pass that runs before the real
- * one; zero skips it. The preview covers the whole disc from the start, at the
- * price of about a decibel and a tenth of the area landing in a neighbouring
- * band — the far sources it drops are what make the exact pass slow.
+ * one; zero skips it. The preview covers the whole disc from the start, and how
+ * far it reaches is the whole trade — the far sources it drops are exactly what
+ * makes the exact pass slow.
  *
- * Measured on Tverskaya: 150 m instead of 350 takes propagation from 926 s to
- * 97 s, so a waiting caller sees a complete map after roughly two and a half
- * minutes instead of a quarter of an hour. The honest result costs ~12% more
- * wall clock for it, and only when somebody is actually watching: prewarming
- * runs without this, as it does without frames.
+ * Measured on Tverskaya, against the exact map (350 m, 926 s of propagation):
+ *
+ *   150 m — 97 s, 9.9% of the area a band off, 1.1 dB low
+ *    75 m — 38 s, 19.0% a band off, 2.7 dB low
+ *
+ * Set to 75: a complete map about a minute after the click is worth more here
+ * than a more accurate one at two and a half minutes, given the exact answer is
+ * a quarter of an hour away regardless. The interface says plainly how rough it
+ * is — see the note in App.tsx, and keep the two in step if this number moves.
+ *
+ * The honest result costs ~6% more wall clock for it, and only when somebody is
+ * watching: prewarming runs without this, as it does without frames.
  *
  * Not part of JOB_PARAMS for the same reason as the frames — the cached result
  * is the exact one either way.
  */
-export const PREVIEW_SRC_DIST = Number(process.env.PREVIEW_SRC_DIST ?? 150);
+export const PREVIEW_SRC_DIST = Number(process.env.PREVIEW_SRC_DIST ?? 75);
 
 /**
  * How long a cancelled pipeline gets to exit on its own before it is killed

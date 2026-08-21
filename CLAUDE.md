@@ -183,11 +183,17 @@ reporting itself through an `@@ERROR` marker that the server shows as-is.
 Before the real propagation, the pipeline runs a cheap one — same receiver mesh,
 same buildings, sources within `PREVIEW_SRC_DIST` metres and no terrain — and
 exports it as `jobs/<id>/preview.geojson`. That is what a waiting caller sees:
-the whole disc after ~2 minutes instead of a quarter of it after ten.
+the whole disc about a minute after the click (67 s measured end to end) instead
+of a quarter of it after ten.
 
-- **Source distance is the only real cost lever.** 350 m → 150 m took Tverskaya
-  propagation from 926 s to 97 s. Terrain is second (926 → 575 s) and `maxArea`
-  is not a lever at all — see the NoiseModelling rakes above.
+- **Source distance is the only real cost lever, and it is the whole trade.**
+  On Tverskaya, against the exact map: 150 m costs 97 s of propagation and lands
+  1.1 dB low with 9.9% of the area a band off; 75 m costs 38 s and lands 2.7 dB
+  low with 19.0% a band off. The default is 75 — a complete map sooner beats a
+  truer one later when the exact answer is a quarter of an hour away — and the
+  note in `App.tsx` quotes those very numbers, so **the two move together**.
+  Terrain is the second lever (926 → 575 s) and `maxArea` is not a lever at all
+  — see the NoiseModelling rakes above.
 - **Terrain stays out of the preview.** With it the pass costs 160 s instead of
   97 and lands no closer to the answer (10.2% of the area in a neighbouring band
   against 9.9%): dropping terrain raises levels, dropping far sources lowers
