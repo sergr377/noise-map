@@ -14,7 +14,7 @@ import {
   TERMINAL_STAGES,
   WEB_DIST,
 } from './config.js';
-import { cacheKey, quantize, readCache, cacheSize } from './cache.js';
+import { cacheKey, quantize, readCache, cacheSize, cachedAreas } from './cache.js';
 import {
   startJob,
   getJob,
@@ -29,6 +29,13 @@ import { geocode, GeocoderError } from './geocode.js';
 import { clientIp, limitHeaders, openStream, take, type Verdict } from './ratelimit.js';
 
 const gzipAsync = promisify(gzip);
+
+/**
+ * Ceiling on how many computed areas one viewport query returns. A whole-country
+ * view would otherwise hand back the entire cache, and at that zoom a 750-metre
+ * disc is a pixel — the client stops asking long before this bites.
+ */
+const AREAS_PER_REQUEST = 500;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -110,6 +117,35 @@ async function handleProbe(res: http.ServerResponse, params: URLSearchParams) {
     // tell "nobody has asked for this" from "somebody is already waiting".
     ...(job ? { state: snapshot(job) } : {}),
   });
+}
+
+/**
+ * GET /api/noise/areas?bbox=minLon,minLat,maxLon,maxLat — computed places whose
+ * disc reaches into that box.
+ *
+ * Exists so the map can shade what is already computed instead of making people
+ * find it with the cursor. Only centres and radii travel: the shapes are discs,
+ * and sending their outlines would be kilobytes per area for a circle the client
+ * can draw from three numbers.
+ */
+async function handleAreas(res: http.ServerResponse, params: URLSearchParams) {
+  const parts = (params.get('bbox') ?? '').split(',').map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) {
+    return sendJson(res, 400, { error: 'bbox must be minLon,minLat,maxLon,maxLat' });
+  }
+  const [minLon, minLat, maxLon, maxLat] = parts as [number, number, number, number];
+  const { areas, truncated } = await cachedAreas(
+    {
+      minLat: Math.min(minLat, maxLat),
+      maxLat: Math.max(minLat, maxLat),
+      minLon: Math.min(minLon, maxLon),
+      maxLon: Math.max(minLon, maxLon),
+    },
+    AREAS_PER_REQUEST,
+  );
+  // Not cacheable: the set grows every time a calculation finishes, and a stale
+  // copy would tell someone a place is ready when it is not.
+  return sendJson(res, 200, { areas, ...(truncated ? { truncated } : {}) }, { 'Cache-Control': 'no-store' });
 }
 
 /** POST /api/noise — resolve a click to either a cached result or a running job. */
@@ -451,6 +487,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/noise' && req.method === 'POST') {
       return await handleCreate(req, res, ip);
+    }
+    if (url.pathname === '/api/noise/areas' && req.method === 'GET') {
+      return await handleAreas(res, url.searchParams);
     }
     if (url.pathname === '/api/noise' && req.method === 'GET') {
       return await handleProbe(res, url.searchParams);

@@ -1,8 +1,8 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef, type ComponentRef } from 'react';
 import type * as Ymaps from './ymaps';
 import { bandFor } from './palette';
-import type { Centre, IsophoneCollection } from './api';
-import type { LngLat, Margin } from '@yandex/ymaps3-types';
+import type { Centre, ComputedArea, IsophoneCollection } from './api';
+import type { LngLat, LngLatBounds, Margin } from '@yandex/ymaps3-types';
 
 interface Props {
   /** The bootstrapped map module. Mounted only once it has loaded, so that the
@@ -25,12 +25,14 @@ interface Props {
   radius: number | null;
   /** Where the cursor is, when it is over the map and nothing is running. */
   hover: Centre | null;
-  /** Whether that place is already computed — a click there costs nothing. */
-  hoverCached: boolean;
+  /** Places already computed, shaded so they can be found by looking. */
+  areas: ComputedArea[];
   /** Whether a calculation is in flight — that is what turns the ring solid. */
   running: boolean;
   onPick: (lat: number, lon: number) => void;
   onHover: (place: Centre | null) => void;
+  /** Reports the camera once it has come to rest, so the shading can follow. */
+  onViewport: (view: { bounds: LngLatBounds; zoom: number }) => void;
 }
 
 /**
@@ -60,10 +62,11 @@ export default function MapCanvas({
   centre,
   radius,
   hover,
-  hoverCached,
+  areas,
   running,
   onPick,
   onHover,
+  onViewport,
 }: Props) {
   const {
     reactify,
@@ -89,6 +92,50 @@ export default function MapCanvas({
     const [lon, lat] = event.coordinates;
     onHover({ lat, lon });
   };
+
+  // Only the camera at rest is reported. This event fires on every frame of a
+  // drag, and passing those upward would re-render the tree sixty times a second
+  // to answer a question whose answer only matters once the map stops.
+  const handleUpdate = ({
+    location: view,
+    mapInAction,
+  }: {
+    location: { bounds: LngLatBounds; zoom: number };
+    mapInAction: boolean;
+  }) => {
+    if (!mapInAction) onViewport({ bounds: view.bounds, zoom: view.zoom });
+  };
+
+  // The update event fires when the camera *changes*, so a map that opens and
+  // is never touched would never report where it is looking. Asking it once, on
+  // mount, is what makes the shaded areas appear before the first pan.
+  const mapRef = useRef<ComponentRef<typeof YMap>>(null);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let tries = 0;
+    // The entity is attached a tick after mount, and its bounds stay empty until
+    // the map has been sized, so this asks again shortly rather than once and
+    // never. A timer, not requestAnimationFrame: in a background tab the frame
+    // callback may never run, and the map would then open unshaded until the
+    // first pan.
+    const ask = () => {
+      const map = mapRef.current;
+      const bounds = map?.bounds;
+      if (map && bounds && bounds[0][0] !== bounds[1][0]) {
+        onViewport({ bounds, zoom: map.zoom });
+        return;
+      }
+      if (tries < 40) {
+        tries += 1;
+        timer = setTimeout(ask, 50);
+      }
+    };
+    ask();
+    return () => clearTimeout(timer);
+    // Deliberately once: every later camera position arrives through the event
+    // above, and re-running this on each render would fight it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Isophones are the expensive part of this tree — tens of thousands of
   // coordinates. Holding the elements themselves means a re-render caused by
@@ -118,6 +165,29 @@ export default function MapCanvas({
     [features, YMapFeature],
   );
 
+  // Everything already computed, as one shape rather than one feature per disc:
+  // overlapping discs then fill once instead of stacking their transparency into
+  // a darker blob, and the map holds a single feature however many places are on
+  // screen. Drawn under the isophones — it is a hint about the map, not data.
+  const computed = useMemo(() => {
+    if (areas.length === 0) return null;
+    return (
+      <YMapFeature
+        geometry={{
+          type: 'MultiPolygon',
+          coordinates: areas.map((area) => [ring(area.lat, area.lon, area.radius, 48)]),
+        }}
+        style={{
+          fill: ACCENT,
+          fillOpacity: 0.1,
+          fillRule: 'nonzero',
+          stroke: [{ color: ACCENT, width: 1, opacity: 0.35 }],
+          zIndex: 0,
+        }}
+      />
+    );
+  }, [areas, YMapFeature]);
+
   // What a click would cover, followed under the cursor. Dashed, because it is
   // a proposal rather than a result; it steps aside while something is running,
   // where the solid ring below says what is actually being computed.
@@ -125,10 +195,17 @@ export default function MapCanvas({
   const active = running && centre && radius ? ring(centre.lat, centre.lon, radius) : null;
 
   return (
-    <YMap location={location} margin={margin}>
+    <YMap location={location} margin={margin} ref={mapRef}>
       <YMapDefaultSchemeLayer />
       <YMapDefaultFeaturesLayer />
-      <YMapListener onClick={handleClick} onMouseMove={handleMove} onMouseLeave={() => onHover(null)} />
+      <YMapListener
+        onClick={handleClick}
+        onMouseMove={handleMove}
+        onMouseLeave={() => onHover(null)}
+        onUpdate={handleUpdate}
+      />
+
+      {computed}
 
       {isophones}
 
@@ -136,11 +213,9 @@ export default function MapCanvas({
         <YMapFeature
           geometry={{ type: 'Polygon', coordinates: [preview] }}
           style={{
-            // An already computed place is drawn filled: the click costs
-            // nothing there, and that is worth seeing before clicking rather
-            // than after waiting.
-            fill: hoverCached ? ACCENT : 'rgba(0, 0, 0, 0)',
-            fillOpacity: hoverCached ? 0.12 : 0,
+            // Empty on purpose: what is already computed is shaded across the
+            // whole map above, so this ring says only what a click would cover.
+            fill: 'rgba(0, 0, 0, 0)',
             stroke: [{ color: ACCENT, width: 2, opacity: 0.75, dash: [8, 7] }],
             zIndex: 500,
           }}

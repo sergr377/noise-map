@@ -264,7 +264,13 @@ function runPipeline(job: Job): Promise<void> {
       if (job.cancelled) return resolve();
       if (code === 0 && resultPath) {
         try {
-          job.bytes = await writeCache(job.id, resultPath);
+          // Where it was computed goes in beside it: the cache key is a hash,
+          // and the map needs the centre to draw the area as computed.
+          job.bytes = await writeCache(job.id, resultPath, {
+            lat: job.lat,
+            lon: job.lon,
+            radius: JOB_PARAMS.radius,
+          });
           job.progress = 1;
           setStage(job, 'done');
         } catch (err) {

@@ -94,25 +94,10 @@ export async function fetchConfig(): Promise<ServiceConfig> {
   return asJson<ServiceConfig>(await fetch('/api/config'));
 }
 
-export interface ProbeResponse {
-  id: string;
-  centre: Centre;
-  radius: number;
-  cached: boolean;
-  bytes?: number;
-  /** Present only while a calculation for this place is alive. */
-  state?: JobState;
-}
-
 /**
- * Asks whether a place has been computed. Unlike requestNoise this starts
- * nothing — it exists so the map can tell instant places from ones that would
- * cost minutes, without costing those minutes to find out.
+ * Starts a calculation, or resolves instantly if the place is already computed.
+ * Which of the two happened is in `cached`.
  */
-export async function probeNoise(lat: number, lon: number): Promise<ProbeResponse> {
-  return asJson<ProbeResponse>(await fetch(`/api/noise?lat=${lat}&lon=${lon}`));
-}
-
 export async function requestNoise(lat: number, lon: number): Promise<CreateResponse> {
   return asJson<CreateResponse>(
     await fetch('/api/noise', {
@@ -132,6 +117,35 @@ export async function geocode(query: string): Promise<Place[]> {
     await fetch(`/api/geocode?q=${encodeURIComponent(query)}`),
   );
   return places;
+}
+
+/** A place that is already computed: a disc the map shades as ready. */
+export interface ComputedArea {
+  id: string;
+  lat: number;
+  lon: number;
+  /** Metres. Comes with each area rather than from config: an older entry may
+   *  have been computed with a different radius. */
+  radius: number;
+}
+
+/**
+ * Computed places reaching into the given box. Called as the viewport moves, so
+ * it carries centres and radii rather than outlines — a disc is three numbers.
+ */
+export async function fetchAreas(bounds: {
+  minLon: number;
+  minLat: number;
+  maxLon: number;
+  maxLat: number;
+}): Promise<ComputedArea[]> {
+  const bbox = [bounds.minLon, bounds.minLat, bounds.maxLon, bounds.maxLat]
+    .map((n) => n.toFixed(5))
+    .join(',');
+  const { areas } = await asJson<{ areas: ComputedArea[] }>(
+    await fetch(`/api/noise/areas?bbox=${bbox}`),
+  );
+  return areas;
 }
 
 export async function fetchResult(id: string): Promise<IsophoneCollection> {

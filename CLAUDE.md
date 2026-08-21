@@ -277,6 +277,18 @@ run it after any change to `quantize`.
   from a locally ticking seconds counter, not from invented progress.
 - Inside `.app`, only the map stretches to full height. The rule `.app > *` once
   inflated the panel to the whole screen.
+- **The camera reports itself only when it moves.** `YMapListener`'s `onUpdate`
+  never fires for a map that opens and is not touched, so the first viewport comes
+  from reading `map.bounds` through a ref — and that entity is attached a tick
+  after mount, with empty bounds until it is sized. Hence the retry loop in
+  `MapCanvas`, and **hence a timer rather than `requestAnimationFrame`**: in a
+  background tab the frame callback may never run, and the map would open without
+  its shaded areas until the first pan.
+- Only the camera **at rest** is passed upward. `onUpdate` fires on every frame of
+  a drag, and forwarding those re-renders the tree sixty times a second.
+- Computed areas are drawn as **one MultiPolygon feature**, not one per disc:
+  overlapping discs then fill once instead of stacking transparency into a dark
+  blob.
 
 ## The rail branch does not work
 

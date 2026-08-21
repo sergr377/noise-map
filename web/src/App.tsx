@@ -2,20 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import type * as Ymaps from './ymaps';
 import MapCanvas from './MapCanvas';
 import { usePanelMargin } from './usePanelMargin';
-import type { Margin } from '@yandex/ymaps3-types';
+import type { LngLatBounds, Margin } from '@yandex/ymaps3-types';
 import { BANDS } from './palette';
 import {
   cancelJob,
   fetchConfig,
+  fetchAreas,
   fetchPartial,
   fetchPreview,
   fetchResult,
-  probeNoise,
   followJob,
   geocode,
   JobCancelled,
   requestNoise,
   type Centre,
+  type ComputedArea,
   type IsophoneCollection,
   type JobState,
   type Period,
@@ -28,6 +29,13 @@ const DEFAULT_CENTER: [number, number] = [37.6173, 55.7558];
 const DEFAULT_ZOOM = 14.4;
 
 /** Web Mercator ground resolution at the equator, metres per pixel at zoom 0. */
+/**
+ * Below this zoom the computed areas are neither drawn nor asked for. A 750-metre
+ * disc is about two pixels here, so the shading would be dust — and the request
+ * would cover half a country to produce it.
+ */
+const MIN_AREA_ZOOM = 11;
+
 const EQUATOR_METRES_PER_PIXEL = 156543.03392;
 
 /** How much of the free map area the disc is allowed to fill. */
@@ -197,11 +205,15 @@ export default function App() {
   const [radius, setRadius] = useState<number | null>(null);
   /** Where the cursor is over the map, for the ring that previews a click. */
   const [hover, setHover] = useState<Centre | null>(null);
-  /** Whether the place under the cursor is already computed and opens instantly. */
-  const [hoverCached, setHoverCached] = useState(false);
-  // Answers already received, so passing over the same block twice is free. The
-  // key is deliberately coarse — about the size of a cache cell.
-  const probed = useRef(new Map<string, boolean>());
+  /** Computed places in view, shaded on the map. */
+  const [areas, setAreas] = useState<ComputedArea[]>([]);
+  /** The camera, as the map last reported it. Null until the map has drawn. */
+  const [view, setView] = useState<{ bounds: LngLatBounds; zoom: number } | null>(null);
+  // Box the shaded areas were last fetched for, grown beyond the viewport so
+  // that ordinary panning does not send a request per frame.
+  const askedFor = useRef<{ minLon: number; minLat: number; maxLon: number; maxLat: number } | null>(
+    null,
+  );
 
   const [period, setPeriod] = useState<Period>(() => readPeriodFromUrl() ?? 'DEN');
   const [data, setData] = useState<IsophoneCollection | null>(null);
@@ -297,36 +309,61 @@ export default function App() {
   }, []);
 
   /**
-   * Asks the server whether the place under the cursor is already computed, but
-   * only once the cursor stops: a request per mouse move would spend the whole
-   * per-address budget on hovering. Answers are remembered, and a failure just
-   * leaves the ring in its default state.
+   * Keeps the shaded areas in step with the viewport.
+   *
+   * Asking about the place under the cursor could only ever answer for the place
+   * under the cursor — someone had to find a computed area by sweeping the mouse
+   * across the map to learn it was there. This asks about everything in view
+   * instead, once the camera has stopped.
+   *
+   * Two things keep the traffic down: the box asked for is half a screen wider
+   * than the screen, so panning inside it costs nothing, and below MIN_AREA_ZOOM
+   * nothing is asked at all — a 750-metre disc is a couple of pixels there, and
+   * a country-wide view would drag the whole cache across the wire to draw dust.
    */
   useEffect(() => {
-    if (!hover || busy) {
-      setHoverCached(false);
+    if (!view) return;
+    if (view.zoom < MIN_AREA_ZOOM) {
+      askedFor.current = null;
+      setAreas([]);
       return;
     }
-    const key = `${hover.lat.toFixed(3)},${hover.lon.toFixed(3)}`;
-    const known = probed.current.get(key);
-    if (known !== undefined) {
-      setHoverCached(known);
-      return;
-    }
+
+    const [[left, top], [right, bottom]] = view.bounds;
+    const inside =
+      askedFor.current &&
+      left >= askedFor.current.minLon &&
+      right <= askedFor.current.maxLon &&
+      bottom >= askedFor.current.minLat &&
+      top <= askedFor.current.maxLat;
+    if (inside) return;
+
+    const padLon = (right - left) / 2;
+    const padLat = (top - bottom) / 2;
+    const box = {
+      minLon: left - padLon,
+      maxLon: right + padLon,
+      minLat: bottom - padLat,
+      maxLat: top + padLat,
+    };
+
     let dropped = false;
     const timer = setTimeout(() => {
-      void probeNoise(hover.lat, hover.lon)
-        .then((probe) => {
-          probed.current.set(key, probe.cached);
-          if (!dropped) setHoverCached(probe.cached);
+      void fetchAreas(box)
+        .then((found) => {
+          if (dropped) return;
+          askedFor.current = box;
+          setAreas(found);
         })
-        .catch(() => {});
-    }, 400);
+        .catch(() => {
+          /* без подсветки карта работает как раньше */
+        });
+    }, 300);
     return () => {
       dropped = true;
       clearTimeout(timer);
     };
-  }, [hover, busy]);
+  }, [view]);
 
   const smoothed = useSmoothProgress(job?.progress ?? 0, busy && !fromCache);
   const elapsed = useElapsedSeconds(busy && !fromCache, job?.elapsedMs);
@@ -430,6 +467,10 @@ export default function App() {
         setData(result);
         setPreview(null);
         setPreviewKind(null);
+        // The place just computed is now one of the shaded ones, and the map is
+        // standing still — nothing else would ask again until it moves.
+        askedFor.current = null;
+        setView((current) => (current ? { ...current } : current));
       } catch (err) {
         // Cancelling is not a failure, and the local handler has already said so.
         if (isCurrent() && !(err instanceof JobCancelled)) setError((err as Error).message);
@@ -540,10 +581,11 @@ export default function App() {
           centre={centre}
           radius={radius}
           hover={hover}
-          hoverCached={hoverCached}
+          areas={areas}
           running={busy && !fromCache}
           onPick={handlePick}
           onHover={setHover}
+          onViewport={setView}
         />
       ) : (
         <div className="map-placeholder">
@@ -586,8 +628,10 @@ export default function App() {
           </button>
         </form>
 
-        {hoverCached && !busy && (
-          <p className="note">Под курсором уже посчитанное место — откроется сразу.</p>
+        {areas.length > 0 && !busy && !data && (
+          <p className="note">
+            Затенённые области уже посчитаны — они открываются сразу, без ожидания.
+          </p>
         )}
 
         {searchError && <p className="error">Поиск не сработал: {searchError}</p>}

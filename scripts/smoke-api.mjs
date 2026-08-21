@@ -121,6 +121,19 @@ const bad = await fetch(`${BASE}/api/noise`, {
 });
 console.log(`invalid coords -> ${bad.status} ${JSON.stringify(await bad.json())}`);
 
+// Посчитанные области в рамке — то, что карта спрашивает при каждой остановке
+// камеры, чтобы затенить готовые места. Точка выше только что посчиталась, так
+// что хотя бы одна область здесь обязана найтись.
+const box = [lon - 0.05, lat - 0.05, lon + 0.05, lat + 0.05].map((n) => n.toFixed(5)).join(',');
+const areas = await fetch(`${BASE}/api/noise/areas?bbox=${box}`).then((r) => r.json());
+const own = areas.areas.filter((a) => a.id === first.body.id).length;
+console.log(
+  `areas в рамке ±0.05°: ${areas.areas.length}, своя точка среди них: ${own === 1}` +
+    (areas.areas[0] ? `, радиус ${Math.round(areas.areas[0].radius)} м` : ''),
+);
+const badBox = await fetch(`${BASE}/api/noise/areas?bbox=nonsense`);
+console.log(`  кривой bbox -> ${badBox.status} ${JSON.stringify(await badBox.json())}`);
+
 // --- отмена -----------------------------------------------------------------
 //
 // Точка берётся в стороне от основной, чтобы не попасть в её кэш. Задача живёт
