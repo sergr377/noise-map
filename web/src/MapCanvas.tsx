@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, type ComponentRef } from 'react';
+import polygonClipping, { type Polygon as ClipPolygon } from 'polygon-clipping';
 import type * as Ymaps from './ymaps';
 import { bandFor } from './palette';
 import type { Centre, ComputedArea, IsophoneCollection } from './api';
@@ -165,22 +166,33 @@ export default function MapCanvas({
     [features, YMapFeature],
   );
 
-  // Everything already computed, as one shape rather than one feature per disc:
-  // overlapping discs then fill once instead of stacking their transparency into
-  // a darker blob, and the map holds a single feature however many places are on
-  // screen. Drawn under the isophones — it is a hint about the map, not data.
+  // Everything already computed, merged into one shape before it is drawn.
+  //
+  // Handing the discs over as a MultiPolygon is not enough: the renderer fills
+  // each polygon separately, so overlaps stack their transparency into a darker
+  // blob and every disc keeps its own outline — a cluster of computed places then
+  // reads as a pile of circles rather than as one region. Union first, and the
+  // seams simply do not exist; holes between discs survive as interior rings,
+  // which is why the fill rule is evenodd.
+  //
+  // The merge is geometric rather than a styling trick because the styling trick
+  // does not exist here: the drawing style has no blend mode and no layer-wide
+  // opacity, so the only way to hide the seams through style is an opaque fill —
+  // which would bury the streets the shading is meant to sit over.
   const computed = useMemo(() => {
     if (areas.length === 0) return null;
+    const discs: ClipPolygon[] = areas.map((area) => [ring(area.lat, area.lon, area.radius, 64)]);
+    // union() wants the first shape and the rest as separate arguments.
+    const [first, ...rest] = discs;
+    if (!first) return null;
+    const merged = polygonClipping.union(first, ...rest);
     return (
       <YMapFeature
-        geometry={{
-          type: 'MultiPolygon',
-          coordinates: areas.map((area) => [ring(area.lat, area.lon, area.radius, 48)]),
-        }}
+        geometry={{ type: 'MultiPolygon', coordinates: merged as LngLat[][][] }}
         style={{
           fill: ACCENT,
           fillOpacity: 0.1,
-          fillRule: 'nonzero',
+          fillRule: 'evenodd',
           stroke: [{ color: ACCENT, width: 1, opacity: 0.35 }],
           zIndex: 0,
         }}

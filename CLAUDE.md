@@ -286,9 +286,12 @@ run it after any change to `quantize`.
   its shaded areas until the first pan.
 - Only the camera **at rest** is passed upward. `onUpdate` fires on every frame of
   a drag, and forwarding those re-renders the tree sixty times a second.
-- Computed areas are drawn as **one MultiPolygon feature**, not one per disc:
-  overlapping discs then fill once instead of stacking transparency into a dark
-  blob.
+- Computed areas are **merged geometrically** (`polygon-clipping`) before they
+  are drawn. One MultiPolygon feature is not enough: the renderer fills each
+  polygon separately, so overlaps stack transparency and every disc keeps its own
+  outline. There is no styling way out — `DrawingStyle` has no blend mode and no
+  layer-wide opacity, and an opaque fill would bury the streets underneath.
+  Holes between discs survive the union as interior rings, hence `evenodd`.
 
 ## The rail branch does not work
 
