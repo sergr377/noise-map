@@ -14,6 +14,7 @@ import path from 'node:path';
 import { bboxAround, bboxEwkt, utmSrid, fetchOsm } from './lib.mjs';
 import { writeDemAsc } from './dem.mjs';
 import { fetchRail, NIGHT_SHARE, TRAIN_TYPE } from './rail.mjs';
+import { lineSplitter } from '../shared/lines.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NM_HOME = path.join(ROOT, '.tools', 'nm', 'NoiseModelling_6.0.0');
@@ -240,55 +241,59 @@ function runScriptRunner(jobDir, paramsPath, withPreview) {
       Dissolve: 'export',
     };
     let tail = [];
-    const capture = (buf) => {
-      const text = buf.toString();
-      for (const line of text.split(/\r?\n/)) {
-        if (!line.trim()) continue;
+    const handleLine = (line) => {
+      if (!line.trim()) return;
 
-        const done = line.match(/\[TIMING\] (\w+) done/);
-        if (done && nextStage[done[1]]) emit('STAGE', nextStage[done[1]]);
+      const done = line.match(/\[TIMING\] (\w+) done/);
+      if (done && nextStage[done[1]]) emit('STAGE', nextStage[done[1]]);
 
-        // Propagation is ~90% of the runtime and NoiseModelling reports it as
-        // cells, which is the only real progress signal the pipeline exposes.
-        const cell = line.match(/Begin processing of cell (\d+)\/(\d+)/);
-        if (cell) emit('PROGRESS', `${cell[1]} ${cell[2]}`);
+      // Propagation is ~90% of the runtime and NoiseModelling reports it as
+      // cells, which is the only real progress signal the pipeline exposes.
+      const cell = line.match(/Begin processing of cell (\d+)\/(\d+)/);
+      if (cell) emit('PROGRESS', `${cell[1]} ${cell[2]}`);
 
-        // A map of everything computed so far, exported mid-run. Only the file
-        // name is taken from the log line and the path is rebuilt here: the
-        // JVM writes its console output in the OS encoding, so a job directory
-        // with non-ASCII characters — a Cyrillic user name, say — comes back
-        // mangled and unopenable. The name itself is always ASCII.
-        const partial = line.match(/\[PARTIAL\].*?(partial-\d+\.geojson)/);
-        if (partial) emit('PARTIAL', path.join(jobDir, partial[1]));
+      // A map of everything computed so far, exported mid-run. Only the file
+      // name is taken from the log line and the path is rebuilt here: the
+      // JVM writes its console output in the OS encoding, so a job directory
+      // with non-ASCII characters — a Cyrillic user name, say — comes back
+      // mangled and unopenable. The name itself is always ASCII.
+      const partial = line.match(/\[PARTIAL\].*?(partial-\d+\.geojson)/);
+      if (partial) emit('PARTIAL', path.join(jobDir, partial[1]));
 
-        // The rough map of the whole area, exported before the real pass starts.
-        // The path is known here and is not read back out of the log, for the
-        // same encoding reason as above.
-        if (line.includes('[PREVIEW]')) {
-          // Announced only once it is trimmed: untrimmed it is two thirds
-          // bigger, for precision no map can show. Trimming is a saving rather
-          // than a requirement, so a failure still announces the map.
-          void roundCoordinates(previewFile, args.coordDecimals)
-            .then((sizes) => {
-              console.log(
-                `  preview: ${(sizes.before / 1024).toFixed(0)} KB -> ` +
-                  `${(sizes.after / 1024).toFixed(0)} KB, ${sizes.features} контуров`,
-              );
-            })
-            .catch((err) => console.log(`  preview: округление не удалось (${err.message})`))
-            .finally(() => emit('PREVIEW', previewFile));
-        }
-
-        if (/\[TIMING\]|\[PARTIAL\]|ERROR|Exception|isosurface|Export/i.test(line)) {
-          console.log('  ' + line.slice(0, 200));
-        }
-        tail.push(line);
-        if (tail.length > 60) tail.shift();
+      // The rough map of the whole area, exported before the real pass starts.
+      // The path is known here and is not read back out of the log, for the
+      // same encoding reason as above.
+      if (line.includes('[PREVIEW]')) {
+        // Announced only once it is trimmed: untrimmed it is two thirds
+        // bigger, for precision no map can show. Trimming is a saving rather
+        // than a requirement, so a failure still announces the map.
+        void roundCoordinates(previewFile, args.coordDecimals)
+          .then((sizes) => {
+            console.log(
+              `  preview: ${(sizes.before / 1024).toFixed(0)} KB -> ` +
+                `${(sizes.after / 1024).toFixed(0)} KB, ${sizes.features} контуров`,
+            );
+          })
+          .catch((err) => console.log(`  preview: округление не удалось (${err.message})`))
+          .finally(() => emit('PREVIEW', previewFile));
       }
+
+      if (/\[TIMING\]|\[PARTIAL\]|ERROR|Exception|isosurface|Export/i.test(line)) {
+        console.log('  ' + line.slice(0, 200));
+      }
+      tail.push(line);
+      if (tail.length > 60) tail.shift();
     };
-    child.stdout.on('data', capture);
-    child.stderr.on('data', capture);
+    // One splitter per stream, and a buffer that survives between chunks: a
+    // data event carries whatever was ready, so a [TIMING] or [PARTIAL] line
+    // torn in half by a chunk boundary used to match neither regexp above.
+    const outLines = lineSplitter(handleLine);
+    const errLines = lineSplitter(handleLine);
+    child.stdout.on('data', (chunk) => outLines.push(chunk));
+    child.stderr.on('data', (chunk) => errLines.push(chunk));
     child.on('close', (code) => {
+      outLines.flush();
+      errLines.flush();
       if (code === 0) resolve();
       else reject(new Error(`ScriptRunner exited ${code}\n${tail.join('\n')}`));
     });
