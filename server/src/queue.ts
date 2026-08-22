@@ -68,7 +68,6 @@ interface Job {
   error?: string;
   bytes?: number;
   listeners: Set<Listener>;
-  settled: Promise<void>;
   /**
    * How many callers are still waiting for this result. Requests to a location
    * already being computed join the run instead of starting a second one, so a
@@ -331,7 +330,6 @@ export function startJob(lat: number, lon: number, wantsPreview = true): Job {
     progress: 0,
     startedAt: Date.now(),
     listeners: new Set(),
-    settled: Promise.resolve(),
     waiters: 1,
     cancelled: false,
     child: null,
@@ -342,7 +340,9 @@ export function startJob(lat: number, lon: number, wantsPreview = true): Job {
   };
   jobs.set(id, job);
 
-  job.settled = (async () => {
+  // Not awaited anywhere: the job publishes its own progress and final state
+  // through the listeners, and nothing outside needs a handle on the run.
+  void (async () => {
     await acquireSlot();
     try {
       // Cancelled while queued: nothing was spawned, so there is nothing to
