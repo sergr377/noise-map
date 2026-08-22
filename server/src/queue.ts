@@ -44,13 +44,17 @@ export interface JobState {
  * it owns most of the wall clock — a bar that races to 90% and then stalls for a
  * minute is worse than no bar at all.
  */
+// Propagation is named apart because it is also the fallback below: a cell
+// report that arrives outside a known stage belongs to the long pass.
+const PROPAGATION_SPAN: [number, number] = [0.28, 0.92];
+
 const STAGE_SPAN: Partial<Record<Stage, [number, number]>> = {
   queued: [0, 0],
   overpass: [0, 0.1],
   import: [0.1, 0.15],
   grid: [0.15, 0.18],
   preview: [0.18, 0.28],
-  propagation: [0.28, 0.92],
+  propagation: PROPAGATION_SPAN,
   isosurface: [0.92, 0.96],
   dissolve: [0.96, 0.98],
   export: [0.98, 1],
@@ -207,7 +211,7 @@ function runPipeline(job: Job): Promise<void> {
     // What the pipeline says about its own failure, when it knows more than the
     // exit code does — a job directory still held by an orphaned run, say.
     let pipelineError: string | null = null;
-    let stderrTail: string[] = [];
+    const stderrTail: string[] = [];
 
     const handleLine = (line: string) => {
       const marker = line.match(/^@@(\w+) (.*)$/);
@@ -229,7 +233,7 @@ function runPipeline(job: Job): Promise<void> {
         // Both propagation passes report cells, so the span is the one of the
         // stage that is running — otherwise the preview would drive the bar
         // through the whole propagation band and then start it over.
-        const span = STAGE_SPAN[job.stage] ?? STAGE_SPAN.propagation!;
+        const span = STAGE_SPAN[job.stage] ?? PROPAGATION_SPAN;
         if (totalCells && doneCells !== undefined) {
           job.progress = span[0] + (span[1] - span[0]) * (doneCells / totalCells);
           publish(job);

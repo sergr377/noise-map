@@ -240,7 +240,7 @@ function runScriptRunner(jobDir, paramsPath, withPreview) {
       Create_Isosurface: 'dissolve',
       Dissolve: 'export',
     };
-    let tail = [];
+    const tail = [];
     const handleLine = (line) => {
       if (!line.trim()) return;
 
@@ -279,7 +279,7 @@ function runScriptRunner(jobDir, paramsPath, withPreview) {
       }
 
       if (/\[TIMING\]|\[PARTIAL\]|ERROR|Exception|isosurface|Export/i.test(line)) {
-        console.log('  ' + line.slice(0, 200));
+        console.log(`  ${line.slice(0, 200)}`);
       }
       tail.push(line);
       if (tail.length > 60) tail.shift();

@@ -136,6 +136,10 @@ function useElapsedSeconds(running: boolean, reported?: number): number {
     if (reported !== undefined) originRef.current = Date.now() - reported;
   }, [reported]);
 
+  // reported в зависимостях не читается телом эффекта, но нужен: приход нового
+  // отчёта обязан пересчитать счётчик от нового начала отсчёта немедленно, а не
+  // через секунду, когда сработает очередной тик.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: перезапуск здесь и есть смысл зависимости
   useEffect(() => {
     if (!running) {
       setSeconds(0);
@@ -666,6 +670,9 @@ export default function App() {
           </ul>
         )}
 
+        {/* biome-ignore lint/a11y/useSemanticElements: <fieldset> тянет за собой
+            собственную рамку и отступы, а группа здесь — ряд кнопок-переключателей,
+            а не поля формы. Роль и подпись дают ту же семантику без правки стилей. */}
         <div className="periods" role="group" aria-label="Период суток">
           {PERIODS.map((p) => (
             <button

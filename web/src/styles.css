@@ -289,6 +289,8 @@ body {
   list-style: none;
 }
 
+/* biome-ignore lint/style/noDescendingSpecificity: .results li + li выше —
+   другой компонент; на одном элементе эти правила не пересекаются. */
 .legend li {
   display: flex;
   align-items: center;

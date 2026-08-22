@@ -27,6 +27,9 @@ jobs:
       - name: Типы
         run: npm run typecheck
 
+      - name: Линтер и форматирование
+        run: npm run lint
+
       - name: Юнит-тесты
         run: npm test
 

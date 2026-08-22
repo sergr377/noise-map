@@ -111,6 +111,9 @@ export default function MapCanvas({
   // is never touched would never report where it is looking. Asking it once, on
   // mount, is what makes the shaded areas appear before the first pan.
   const mapRef = useRef<ComponentRef<typeof YMap>>(null);
+  // Спрашиваем один раз, на монтировании: с onViewport в зависимостях цикл опроса
+  // перезапускался бы на каждое изменение колбэка и спорил бы с событием камеры.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: намеренно один раз
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let tries = 0;
@@ -135,7 +138,6 @@ export default function MapCanvas({
     return () => clearTimeout(timer);
     // Deliberately once: every later camera position arrives through the event
     // above, and re-running this on each render would fight it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Isophones are the expensive part of this tree — tens of thousands of

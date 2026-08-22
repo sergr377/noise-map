@@ -454,7 +454,7 @@ const CONTENT_TYPES: Record<string, string> = {
  * Serves the built frontend when it exists. Unknown paths fall back to
  * index.html so that a deep link like /?lat=..&lon=.. survives a page reload.
  */
-async function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathname: string) {
+async function serveStatic(res: http.ServerResponse, pathname: string) {
   // decodeURIComponent matters: %2e%2e%2f survives URL normalisation and would
   // otherwise reach the filesystem as ../ after any later decoding.
   let relative: string;
@@ -564,7 +564,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
-      return await serveStatic(req, res, url.pathname);
+      return await serveStatic(res, url.pathname);
     }
 
     return sendJson(res, 404, { error: 'not found' });

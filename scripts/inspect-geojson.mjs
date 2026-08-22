@@ -24,7 +24,16 @@ for (const key of ['PERIOD', 'ISOLVL', 'ISOLABEL']) {
   }
 }
 
+// A coordinate pair is the leaf of the nesting: [x, y] against rings of rings.
+function countPairs(node) {
+  if (typeof node[0] === 'number') return 1;
+  let total = 0;
+  for (const child of node) total += countPairs(child);
+  return total;
+}
+
 let coords = 0;
-const walk = (c) => (typeof c[0] === 'number' ? (coords += 1) : c.forEach(walk));
-feats.forEach((f) => f.geometry && walk(f.geometry.coordinates));
+for (const f of feats) {
+  if (f.geometry) coords += countPairs(f.geometry.coordinates);
+}
 console.log(`total coordinate pairs: ${coords}`);
