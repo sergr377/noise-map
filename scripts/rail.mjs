@@ -103,11 +103,7 @@ out tags geom;`;
     });
   }
 
-  await writeFile(
-    outPath,
-    JSON.stringify({ type: 'FeatureCollection', features }),
-    'utf8',
-  );
+  await writeFile(outPath, JSON.stringify({ type: 'FeatureCollection', features }), 'utf8');
 
   const fromOsm = features.filter((f) => f.properties.SPEED_SOURCE === 'osm').length;
   return { path: outPath, sections: features.length, speedFromOsm: fromOsm };

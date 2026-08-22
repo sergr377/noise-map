@@ -162,14 +162,11 @@ export function limitHeaders(verdict: Verdict): Record<string, string> {
 
 // A refilled bucket is indistinguishable from a client that never appeared, so
 // dropping it is free. Without this the map would grow with every address seen.
-const sweep = setInterval(
-  () => {
-    const now = Date.now();
-    for (const [key, bucket] of buckets) {
-      const refilled = bucket.tokens + ((now - bucket.updatedAt) / 1000) * bucket.refill;
-      if (refilled >= bucket.capacity) buckets.delete(key);
-    }
-  },
-  10 * 60_000,
-);
+const sweep = setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of buckets) {
+    const refilled = bucket.tokens + ((now - bucket.updatedAt) / 1000) * bucket.refill;
+    if (refilled >= bucket.capacity) buckets.delete(key);
+  }
+}, 10 * 60_000);
 sweep.unref();

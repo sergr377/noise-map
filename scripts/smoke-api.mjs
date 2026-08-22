@@ -66,7 +66,11 @@ const t0 = Date.now();
 const first = await request();
 console.log(`POST /api/noise -> ${first.status}`, first.body);
 // 200 — уже посчитано, 202 — расчёт принят в работу.
-check('POST /api/noise принят', first.status === 200 || first.status === 202, `HTTP ${first.status}`);
+check(
+  'POST /api/noise принят',
+  first.status === 200 || first.status === 202,
+  `HTTP ${first.status}`,
+);
 check(
   'в ответе есть id, центр и радиус',
   typeof first.body.id === 'string' &&
@@ -127,7 +131,11 @@ if (!first.body.cached) {
   }
 
   check('поток прогресса что-то сообщил', ticks > 0, `событий: ${ticks}`);
-  check('расчёт завершился успехом', finalStage === 'done', `стадия: ${finalStage || 'поток оборвался'}`);
+  check(
+    'расчёт завершился успехом',
+    finalStage === 'done',
+    `стадия: ${finalStage || 'поток оборвался'}`,
+  );
   if (frames === 0) {
     // Кадры по умолчанию выключены (PARTIAL_INTERVAL_MS=0) — их отсутствие
     // здесь не дефект, а настройка.
@@ -183,7 +191,9 @@ const again = await fetch(`${BASE}/api/noise`, {
   body: JSON.stringify(centre),
 }).then((r) => r.json());
 const drift = Math.abs(again.centre.lat - centre.lat) + Math.abs(again.centre.lon - centre.lon);
-console.log(`centre re-snaps to itself: ${again.id === first.body.id}, cached=${again.cached}, drift=${drift}`);
+console.log(
+  `centre re-snaps to itself: ${again.id === first.body.id}, cached=${again.cached}, drift=${drift}`,
+);
 check('центр ячейки округляется сам в себя', again.id === first.body.id && drift === 0);
 
 // Клик мимо центра, но внутри посчитанного круга, обязан открыться из кэша:
@@ -280,8 +290,10 @@ if (cancelRes.status !== 200 && cancelRes.status !== 202) {
       : '  одновременные подписки: десять прошло — адрес в исключениях (loopback) ' +
           'или STREAM_LIMIT_PER_IP больше десяти',
   );
-  if (refusedAt) check('лишние подписки на прогресс отклоняются', refusedAt > 1, `отказ на ${refusedAt}-й`);
-  else skip('лишние подписки на прогресс отклоняются', 'адрес в исключениях или лимит больше десяти');
+  if (refusedAt)
+    check('лишние подписки на прогресс отклоняются', refusedAt > 1, `отказ на ${refusedAt}-й`);
+  else
+    skip('лишние подписки на прогресс отклоняются', 'адрес в исключениях или лимит больше десяти');
   // Слоты обязаны вернуться до проверки отмены ниже, иначе её поток откажут.
   for (const body of probes) await body.cancel().catch(() => {});
   await new Promise((r) => setTimeout(r, 200));
@@ -299,7 +311,8 @@ if (cancelRes.status !== 200 && cancelRes.status !== 202) {
   // остальных. На практике так выглядит недобитый прогон этого же скрипта.
   const shared = cancelled.cancelled === false && cancelled.waiters > 0;
   if (cancelStatus === 429) skip('DELETE сообщил об отмене', 'лимит частоты не пустил отмену');
-  else if (shared) skip('DELETE сообщил об отмене', `расчёт ждёт ещё ${cancelled.waiters} — прерванный прогон?`);
+  else if (shared)
+    skip('DELETE сообщил об отмене', `расчёт ждёт ещё ${cancelled.waiters} — прерванный прогон?`);
   else check('DELETE сообщил об отмене', cancelled.cancelled === true);
 
   // Ждать закрытия потока можно только у остановленного расчёта. У живого он
@@ -326,7 +339,9 @@ if (cancelRes.status !== 200 && cancelRes.status !== 202) {
 
   const afterCancel = await fetch(`${BASE}/api/noise/${cancelTarget.id}/result`);
   const afterCancelBody = await afterCancel.json();
-  console.log(`  GET result отменённой -> ${afterCancel.status} ${JSON.stringify(afterCancelBody)}`);
+  console.log(
+    `  GET result отменённой -> ${afterCancel.status} ${JSON.stringify(afterCancelBody)}`,
+  );
 
   const unknown = await fetch(`${BASE}/api/noise/${'0'.repeat(16)}`, { method: 'DELETE' });
   console.log(`  DELETE несуществующей -> ${unknown.status}`);
@@ -334,7 +349,9 @@ if (cancelRes.status !== 200 && cancelRes.status !== 202) {
   // Всё, что ниже, имеет смысл только если отмена состоялась. Иначе это отчёт
   // о лимитере, а не о поведении сервера при отмене.
   if (!stopped) {
-    const why = shared ? 'расчёт остался жить для других ожидающих' : 'отмена не прошла лимит частоты';
+    const why = shared
+      ? 'расчёт остался жить для других ожидающих'
+      : 'отмена не прошла лимит частоты';
     skip('поток закрылся стадией cancelled', why);
     skip('у отменённой задачи нет результата', why);
   } else {

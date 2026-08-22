@@ -311,7 +311,8 @@ function runPipeline(job: Job): Promise<void> {
 export function startJob(lat: number, lon: number, wantsPreview = true): Job {
   const id = cacheKey(lat, lon);
   const existing = jobs.get(id);
-  const spent = existing?.stage === 'cancelled' || (existing?.stage === 'error' && existing.retryable);
+  const spent =
+    existing?.stage === 'cancelled' || (existing?.stage === 'error' && existing.retryable);
   if (existing && !spent) {
     existing.waiters += 1;
     return existing;

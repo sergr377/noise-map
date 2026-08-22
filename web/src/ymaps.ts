@@ -29,10 +29,7 @@ function loadScript(src: string): Promise<void> {
 
 await loadScript(`https://api-maps.yandex.ru/v3/?apikey=${apiKey}&lang=ru_RU`);
 
-const [ymaps3React] = await Promise.all([
-  ymaps3.import('@yandex/ymaps3-reactify'),
-  ymaps3.ready,
-]);
+const [ymaps3React] = await Promise.all([ymaps3.import('@yandex/ymaps3-reactify'), ymaps3.ready]);
 
 export const reactify = ymaps3React.reactify.bindTo(React, ReactDOM);
 

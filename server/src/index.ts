@@ -166,14 +166,17 @@ async function handleAreas(res: http.ServerResponse, params: URLSearchParams) {
   );
   // Not cacheable: the set grows every time a calculation finishes, and a stale
   // copy would tell someone a place is ready when it is not.
-  return sendJson(res, 200, { areas, ...(truncated ? { truncated } : {}) }, { 'Cache-Control': 'no-store' });
+  return sendJson(
+    res,
+    200,
+    { areas, ...(truncated ? { truncated } : {}) },
+    { 'Cache-Control': 'no-store' },
+  );
 }
 
 /** POST /api/noise — resolve a click to either a cached result or a running job. */
 async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse, ip: string) {
-  const body = (await readBody(req)) as
-    | { lat?: unknown; lon?: unknown; preview?: unknown }
-    | null;
+  const body = (await readBody(req)) as { lat?: unknown; lon?: unknown; preview?: unknown } | null;
   const point = readPoint(body?.lat, body?.lon);
 
   if (!point) {

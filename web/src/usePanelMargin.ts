@@ -34,9 +34,7 @@ export function usePanelMargin(panelRef: RefObject<HTMLElement | null>): Margin 
         ? [0, 0, Math.max(0, Math.round(window.innerHeight - rect.top)), 0]
         : [0, 0, 0, Math.max(0, Math.round(rect.right))];
 
-      setMargin((prev) =>
-        prev.every((value, index) => value === next[index]) ? prev : next,
-      );
+      setMargin((prev) => (prev.every((value, index) => value === next[index]) ? prev : next));
     };
 
     measure();

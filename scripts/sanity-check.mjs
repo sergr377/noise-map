@@ -53,8 +53,7 @@ const items = feats.flatMap((f) =>
 const latRef = items[0].c[1];
 const mPerDegLat = 111320;
 const mPerDegLon = 111320 * Math.cos((latRef * Math.PI) / 180);
-const dist = (a, b) =>
-  Math.hypot((a[0] - b[0]) * mPerDegLon, (a[1] - b[1]) * mPerDegLat);
+const dist = (a, b) => Math.hypot((a[0] - b[0]) * mPerDegLon, (a[1] - b[1]) * mPerDegLat);
 
 const loud = items.filter((i) => i.level >= 70);
 const quiet = items.filter((i) => i.level <= 47.5);

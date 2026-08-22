@@ -211,9 +211,12 @@ export default function App() {
   const [view, setView] = useState<{ bounds: LngLatBounds; zoom: number } | null>(null);
   // Box the shaded areas were last fetched for, grown beyond the viewport so
   // that ordinary panning does not send a request per frame.
-  const askedFor = useRef<{ minLon: number; minLat: number; maxLon: number; maxLat: number } | null>(
-    null,
-  );
+  const askedFor = useRef<{
+    minLon: number;
+    minLat: number;
+    maxLon: number;
+    maxLat: number;
+  } | null>(null);
 
   const [period, setPeriod] = useState<Period>(() => readPeriodFromUrl() ?? 'DEN');
   const [data, setData] = useState<IsophoneCollection | null>(null);
@@ -575,47 +578,47 @@ export default function App() {
       {/* The map fills the app; the panel floats over it and must be free to
           size itself to its content. */}
       <div className="map">
-      {maps ? (
-        <MapCanvas
-          maps={maps}
-          location={location}
-          margin={margin}
-          features={visible}
-          centre={centre}
-          radius={radius}
-          hover={hover}
-          areas={areas}
-          running={busy && !fromCache}
-          onPick={handlePick}
-          onHover={setHover}
-          onViewport={setView}
-        />
-      ) : (
-        <div className="map-placeholder">
-          {mapError ? (
-            <div className="map-error">
-              <strong>Карта не загрузилась</strong>
-              <p>{mapError}</p>
-              <p className="note">
-                Яндекс отвечает <code>Invalid api key</code> в двух разных случаях, не различая
-                их: к ключу не подключён JavaScript API, либо для него не заданы обязательные
-                ограничения по HTTP Referer или IP — без них ключ JS API 3.0 не работает.
-                Проверьте оба пункта в кабинете разработчика; для локальной разработки в поле
-                Referer добавляется <code>localhost</code>, без протокола и порта.
-              </p>
-            </div>
-          ) : (
-            <span className="note">Загружаю карту…</span>
-          )}
-        </div>
-      )}
+        {maps ? (
+          <MapCanvas
+            maps={maps}
+            location={location}
+            margin={margin}
+            features={visible}
+            centre={centre}
+            radius={radius}
+            hover={hover}
+            areas={areas}
+            running={busy && !fromCache}
+            onPick={handlePick}
+            onHover={setHover}
+            onViewport={setView}
+          />
+        ) : (
+          <div className="map-placeholder">
+            {mapError ? (
+              <div className="map-error">
+                <strong>Карта не загрузилась</strong>
+                <p>{mapError}</p>
+                <p className="note">
+                  Яндекс отвечает <code>Invalid api key</code> в двух разных случаях, не различая
+                  их: к ключу не подключён JavaScript API, либо для него не заданы обязательные
+                  ограничения по HTTP Referer или IP — без них ключ JS API 3.0 не работает.
+                  Проверьте оба пункта в кабинете разработчика; для локальной разработки в поле
+                  Referer добавляется <code>localhost</code>, без протокола и порта.
+                </p>
+              </div>
+            ) : (
+              <span className="note">Загружаю карту…</span>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="panel" ref={panelRef}>
         <h1>Карта шума</h1>
         <p className="lead">
-          Найдите адрес или кликните по карте — рассчитаем уровень шума от автотранспорта
-          в радиусе 750 м по методу CNOSSOS-EU.
+          Найдите адрес или кликните по карте — рассчитаем уровень шума от автотранспорта в радиусе
+          750 м по методу CNOSSOS-EU.
         </p>
 
         <form className="search" onSubmit={handleSearch}>
@@ -701,28 +704,27 @@ export default function App() {
             </div>
             {preview && previewKind === 'rough' && (
               <p className="note">
-                Показана предварительная оценка: она учитывает только дороги
-                ближе 75 м, поэтому уровни занижены на 2–3 дБ, а пятая часть
-                площади попадёт в соседнюю полосу — во дворах сейчас тише, чем
-                будет на точной карте. Точный расчёт заменит её целиком, не
+                Показана предварительная оценка: она учитывает только дороги ближе 75 м, поэтому
+                уровни занижены на 2–3 дБ, а пятая часть площади попадёт в соседнюю полосу — во
+                дворах сейчас тише, чем будет на точной карте. Точный расчёт заменит её целиком, не
                 сдвигая контуров.
               </p>
             )}
             {preview && previewKind === 'frame' && (
               <p className="note">
-                Показана карта на текущий момент расчёта: чем дальше, тем больше
-                закрашено. Итоговая заменит её целиком.
+                Показана карта на текущий момент расчёта: чем дальше, тем больше закрашено. Итоговая
+                заменит её целиком.
               </p>
             )}
             {superseded && (
               <p className="note">
-                Предыдущий расчёт продолжается на сервере и попадёт в кэш — вернётесь к
-                той точке, откроется сразу.
+                Предыдущий расчёт продолжается на сервере и попадёт в кэш — вернётесь к той точке,
+                откроется сразу.
               </p>
             )}
             <p className="note">
-              Первый расчёт для нового места занимает 6–27 минут: в плотной застройке
-              дольше, на окраинах быстрее. Повторный клик рядом отдаётся из кэша мгновенно.
+              Первый расчёт для нового места занимает 6–27 минут: в плотной застройке дольше, на
+              окраинах быстрее. Повторный клик рядом отдаётся из кэша мгновенно.
             </p>
           </div>
         )}
@@ -733,9 +735,9 @@ export default function App() {
           <p className="note">
             Расчёт отменён
             {previewKind === 'rough' ? '; на карте осталась предварительная оценка' : ''}
-            {previewKind === 'frame' ? '; на карте осталось то, что успело посчитаться' : ''}.
-            Если эту же точку ждал кто-то ещё, счёт продолжается — тогда результат
-            всё равно попадёт в кэш.
+            {previewKind === 'frame' ? '; на карте осталось то, что успело посчитаться' : ''}. Если
+            эту же точку ждал кто-то ещё, счёт продолжается — тогда результат всё равно попадёт в
+            кэш.
           </p>
         )}
 
@@ -748,9 +750,9 @@ export default function App() {
 
         {covering && data && !busy && (
           <p className="note">
-            Готовый расчёт соседнего места — ваша точка внутри него, поэтому карта
-            открылась сразу. Центр отмечен на карте: он в стороне от клика, но у
-            края круга расчёт такой же полный, как в середине.
+            Готовый расчёт соседнего места — ваша точка внутри него, поэтому карта открылась сразу.
+            Центр отмечен на карте: он в стороне от клика, но у края круга расчёт такой же полный,
+            как в середине.
           </p>
         )}
 

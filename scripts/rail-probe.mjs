@@ -47,7 +47,12 @@ const count = (list, key) => {
   return [...map.entries()].sort((a, b) => b[1] - a[1]);
 };
 
-console.log('по типам:', count(ways, 'railway').map(([k, v]) => `${k}=${v}`).join(', ') || '—');
+console.log(
+  'по типам:',
+  count(ways, 'railway')
+    .map(([k, v]) => `${k}=${v}`)
+    .join(', ') || '—',
+);
 
 // Only these carry trains the CNOSSOS rail module can represent.
 const surface = ways.filter(
@@ -58,9 +63,16 @@ console.log(`\nповерхностная ж/д (без тоннелей): ${sur
 for (const key of ['usage', 'maxspeed', 'tracks', 'service', 'electrified']) {
   const present = surface.filter((w) => w.tags[key]).length;
   const share = surface.length ? ((present / surface.length) * 100).toFixed(0) : '0';
-  const values = count(surface, key).slice(0, 5).map(([k, v]) => `${k}(${v})`).join(', ');
-  console.log(`  ${key.padEnd(12)} есть у ${String(present).padStart(3)} из ${surface.length} (${share}%)  ${values}`);
+  const values = count(surface, key)
+    .slice(0, 5)
+    .map(([k, v]) => `${k}(${v})`)
+    .join(', ');
+  console.log(
+    `  ${key.padEnd(12)} есть у ${String(present).padStart(3)} из ${surface.length} (${share}%)  ${values}`,
+  );
 }
 
 const trams = ways.filter((w) => w.tags.railway === 'tram');
-console.log(`\nтрамвайных путей: ${trams.length} — не моделируются, в каталоге CNOSSOS нет трамвая`);
+console.log(
+  `\nтрамвайных путей: ${trams.length} — не моделируются, в каталоге CNOSSOS нет трамвая`,
+);
