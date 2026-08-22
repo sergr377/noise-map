@@ -14,6 +14,7 @@ import {
   type Stage,
 } from './config.js';
 import { cacheKey, quantize, writeCache } from './cache.js';
+import { lineSplitter } from '../../shared/lines.mjs';
 
 export interface JobState {
   id: string;
@@ -246,19 +247,17 @@ function runPipeline(job: Job): Promise<void> {
       }
     };
 
-    let buffer = '';
-    const consume = (chunk: Buffer) => {
-      buffer += chunk.toString();
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
-      lines.forEach(handleLine);
-    };
-    child.stdout.on('data', consume);
-    child.stderr.on('data', consume);
+    // One splitter per stream. A shared buffer would append the head of a
+    // stderr line to an unfinished stdout one and lose the marker in both.
+    const outLines = lineSplitter(handleLine);
+    const errLines = lineSplitter(handleLine);
+    child.stdout.on('data', (chunk: Buffer) => outLines.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => errLines.push(chunk));
 
     child.on('close', async (code) => {
       job.child = null;
-      if (buffer) handleLine(buffer);
+      outLines.flush();
+      errLines.flush();
       // A killed pipeline exits non-zero with a truncated log. That is not a
       // failure to report — the stage was already set when the kill was issued.
       if (job.cancelled) return resolve();
