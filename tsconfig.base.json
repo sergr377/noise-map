@@ -1,0 +1,19 @@
+{
+  "//": [
+    "Shared by server/ and web/. Everything that should hold on both sides lives",
+    "here, so the two cannot quietly drift apart: strictness applied to only one",
+    "half of a codebase is the half where the next bug is.",
+    "",
+    "What stays in the per-project files is what genuinely differs: the module",
+    "system (NodeNext against a bundler), the library set (node against DOM),",
+    "and where the output goes."
+  ],
+  "compilerOptions": {
+    "target": "ES2022",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true
+  }
+}
