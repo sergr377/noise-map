@@ -10,7 +10,8 @@
     "server": "npm run build:server && node server/dist/index.js",
     "web": "vite",
     "build:web": "vite build",
-    "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json"
+    "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json",
+    "test": "node --test \"test/*.test.mjs\""
   },
   "engines": {
     "node": ">=20"

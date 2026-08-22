@@ -320,6 +320,7 @@ node scripts/compare-runs.mjs jobs/<id>/isophones_nodem.geojson jobs/<id>/isopho
 ```bash
 npm run server        # сборка TypeScript + запуск на :8787
 node scripts/smoke-api.mjs   # сквозная проверка API
+npm test                     # юнит-тесты чистых функций (без Java и сети)
 ```
 
 Сервер не дублирует логику расчёта — он запускает тот же `run-job.mjs`
@@ -1022,6 +1023,11 @@ scripts/
   inspect-geojson.mjs     структура выхлопа: периоды, уровни, размер
   smoke-api.mjs           сквозная проверка HTTP-слоя
   check-quantize.mjs      проверка идемпотентности округления
+shared/                   код, общий для сервера и скриптов
+  lines.mjs               разбор потока на строки через границы чанков
+  stages.mjs              список стадий расчёта, откуда выведен тип Stage
+test/                     юнит-тесты (node:test), гоняются в CI
+.github/workflows/ci.yml  типы, тесты, обе сборки, идемпотентность сетки
 jobs/                     результаты прогонов (не в git)
 cache/                    отдаваемые API результаты (не в git)
 .tools/                   дистрибутив NoiseModelling (не в git)
