@@ -259,6 +259,14 @@ The cache key is derived from the rounded coordinates **and the calculation
 parameters** (`JOB_PARAMS`). Changing any of them — radius, diffraction, terrain —
 makes the whole cache unreachable, and the demo points must be **prewarmed again**.
 
+**A cell hit is not the only way to be served.** The cell is ~100 m and a result
+covers a disc of 750 — 175 times the area — so `coveringArea` also answers with a
+neighbouring result whose disc contains the point, deepest cover first. Both
+`POST /api/noise` and the probe go through the same helper (`ready`): if those two
+ever disagree, the map shades a place as ready and then spends a quarter of an
+hour on it when clicked. The answer carries `covering: true` and the neighbour's
+centre, which the interface explains rather than hides.
+
 Grid snapping must stay idempotent: the longitude step is computed from the
 already-snapped latitude. `check-quantize.mjs` verifies this across ~88 000 points;
 run it after any change to `quantize`.

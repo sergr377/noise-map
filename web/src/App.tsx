@@ -233,6 +233,8 @@ export default function App() {
   const [job, setJob] = useState<JobState | null>(null);
   const [busy, setBusy] = useState(false);
   const [fromCache, setFromCache] = useState(false);
+  /** Whether the shown result is a neighbour's disc that covers the click. */
+  const [covering, setCovering] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const panelRef = useRef<HTMLDivElement>(null);
@@ -409,6 +411,7 @@ export default function App() {
         if (!isCurrent()) return;
         setCentre(created.centre);
         setFromCache(created.cached);
+        setCovering(created.covering === true);
         // A deep link or an address search moves the camera anyway, so framing
         // the disc that is about to appear is part of that same move. A map
         // click is deliberately left alone: the user chose that view, and
@@ -740,6 +743,14 @@ export default function App() {
           <p className="note">
             {fromCache ? 'Взято из кэша.' : 'Рассчитано.'} Показан период{' '}
             {PERIODS.find((p) => p.id === period)?.label}, {visible.length} контуров.
+          </p>
+        )}
+
+        {covering && data && !busy && (
+          <p className="note">
+            Готовый расчёт соседнего места — ваша точка внутри него, поэтому карта
+            открылась сразу. Центр отмечен на карте: он в стороне от клика, но у
+            края круга расчёт такой же полный, как в середине.
           </p>
         )}
 

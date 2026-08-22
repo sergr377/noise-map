@@ -172,6 +172,38 @@ function ensureIndex(): Promise<Map<string, CachedArea>> {
 }
 
 /**
+ * The computed result covering this point, if there is one.
+ *
+ * A click is snapped to a ~100 m cell, but a result covers a disc of 750 — an
+ * area 175 times larger. Without this, clicking anywhere in a shaded area except
+ * the cell it was computed from started a fresh quarter of an hour, and the
+ * shading promised something it did not deliver.
+ *
+ * Handing over a neighbour's map is honest here because the disc is uniformly
+ * valid: receivers are bounded by it, while sources and buildings are extracted
+ * to radius + maxSrcDist, so a receiver on the rim has every source that can
+ * reach it. The map is not centred on the click, which the interface says.
+ *
+ * Of several covering areas the deepest-covering one wins — the click sits
+ * furthest from its rim, and with equal radii that is simply the nearest centre.
+ */
+export async function coveringArea(lat: number, lon: number): Promise<CachedArea | null> {
+  const all = await ensureIndex();
+  let best: CachedArea | null = null;
+  let bestDepth = Infinity;
+  for (const area of all.values()) {
+    const dx = (lon - area.lon) * 111320 * Math.cos((area.lat * Math.PI) / 180);
+    const dy = (lat - area.lat) * 111320;
+    const relative = Math.sqrt(dx * dx + dy * dy) / area.radius;
+    if (relative <= 1 && relative < bestDepth) {
+      bestDepth = relative;
+      best = area;
+    }
+  }
+  return best;
+}
+
+/**
  * Computed areas whose disc reaches into the given box.
  *
  * The test is the box grown by the disc radius against the centre — a circle

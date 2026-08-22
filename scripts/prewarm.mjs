@@ -105,7 +105,10 @@ for (const target of targets) {
     });
     if (created.body.cached) {
       already += 1;
-      console.log(`уже в кэше (${(created.body.bytes / 1024).toFixed(0)} КБ)`);
+      // Точка может быть не посчитана сама, но попадать внутрь соседнего диска —
+      // тогда она и так открывается мгновенно, и греть её нечем.
+      const how = created.body.covering ? 'накрыта соседним расчётом' : 'уже в кэше';
+      console.log(`${how} (${(created.body.bytes / 1024).toFixed(0)} КБ)`);
       continue;
     }
     let lastLabel = '';

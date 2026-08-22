@@ -43,6 +43,12 @@ export interface CreateResponse {
   /** Radius of the computed disc, metres. Comes from the server's job params. */
   radius: number;
   bytes?: number;
+  /**
+   * Set when the answer is a neighbouring calculation whose disc covers the
+   * click rather than one centred on it. The map is valid at the clicked point
+   * either way; what differs is where its centre sits.
+   */
+  covering?: boolean;
 }
 
 export type Period = 'D' | 'E' | 'N' | 'DEN';

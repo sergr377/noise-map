@@ -113,6 +113,31 @@ console.log(
     `drift=${Math.abs(again.centre.lat - centre.lat) + Math.abs(again.centre.lon - centre.lon)}`,
 );
 
+// Клик мимо центра, но внутри посчитанного круга, обязан открыться из кэша:
+// диск показа 750 м, а ячейка кэша ~100 м, так что без этого правила почти любой
+// клик по затенённой области запускал бы расчёт заново.
+const near = { lat: centre.lat + 500 / 111320, lon: centre.lon };
+const nearRes = await fetch(`${BASE}/api/noise`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(near),
+}).then((r) => r.json());
+const nearOffset = Math.round(
+  Math.hypot(
+    (nearRes.centre.lat - near.lat) * 111320,
+    (nearRes.centre.lon - near.lon) * 111320 * Math.cos((near.lat * Math.PI) / 180),
+  ),
+);
+console.log(
+  `клик в 500 м от центра: cached=${nearRes.cached}, накрывающий=${nearRes.covering === true}, ` +
+    `центр в ${nearOffset} м от клика`,
+);
+// Если правило сломалось, мы только что заказали расчёт на четверть часа.
+if (!nearRes.cached) {
+  await fetch(`${BASE}/api/noise/${nearRes.id}`, { method: 'DELETE' });
+  console.log('  расчёт, запущенный по ошибке, отменён');
+}
+
 // Garbage input must be rejected rather than queued.
 const bad = await fetch(`${BASE}/api/noise`, {
   method: 'POST',

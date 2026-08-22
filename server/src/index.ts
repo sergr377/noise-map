@@ -14,7 +14,7 @@ import {
   TERMINAL_STAGES,
   WEB_DIST,
 } from './config.js';
-import { cacheKey, quantize, readCache, cacheSize, cachedAreas } from './cache.js';
+import { cacheKey, quantize, readCache, cacheSize, cachedAreas, coveringArea } from './cache.js';
 import {
   startJob,
   getJob,
@@ -106,17 +106,38 @@ async function handleProbe(res: http.ServerResponse, params: URLSearchParams) {
   const id = cacheKey(point.lat, point.lon);
   const bytes = await cacheSize(id);
   const job = getJob(id);
+  // A place is ready when a result covers it, not only when it is the centre of
+  // one — the same rule the POST below answers by.
+  const covering = bytes === null ? await ready(point.lat, point.lon) : null;
 
   return sendJson(res, 200, {
-    id,
-    centre: quantize(point.lat, point.lon),
-    radius: JOB_PARAMS.radius,
-    cached: bytes !== null,
+    id: covering?.id ?? id,
+    centre: covering ? { lat: covering.lat, lon: covering.lon } : quantize(point.lat, point.lon),
+    radius: covering?.radius ?? JOB_PARAMS.radius,
+    cached: bytes !== null || covering !== null,
     ...(bytes !== null ? { bytes } : {}),
+    ...(covering ? { bytes: covering.bytes, covering: true } : {}),
     // Present only while a calculation for this cell is alive, so a caller can
     // tell "nobody has asked for this" from "somebody is already waiting".
     ...(job ? { state: snapshot(job) } : {}),
   });
+}
+
+/**
+ * A finished result covering this point, with its size — or null if the place
+ * has to be computed.
+ *
+ * Split out because both the probe and the create route answer the same
+ * question, and answering it differently in the two would mean the map shades a
+ * place as ready and then spends a quarter of an hour on it when clicked.
+ */
+async function ready(lat: number, lon: number) {
+  const area = await coveringArea(lat, lon);
+  if (!area) return null;
+  const bytes = await cacheSize(area.id);
+  // The index is memory and the file is disk; a result deleted underneath it is
+  // not a covering result any more.
+  return bytes === null ? null : { ...area, bytes };
 }
 
 /**
@@ -172,6 +193,26 @@ async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse,
   const bytes = await cacheSize(id);
   if (bytes !== null) {
     return sendJson(res, 200, { id, cached: true, bytes, centre, radius });
+  }
+
+  // Nothing computed for this cell — but a neighbour's disc may already cover
+  // the point. A result is a map of an area, and the click is inside that area,
+  // so handing it over answers the question that was asked. Without this, every
+  // click in a shaded area except the one cell it was computed from started a
+  // quarter of an hour of work for a map that already existed.
+  const covering = await ready(lat, lon);
+  if (covering) {
+    return sendJson(res, 200, {
+      id: covering.id,
+      cached: true,
+      bytes: covering.bytes,
+      // The centre is the neighbour's, up to a radius away from the click. Said
+      // plainly rather than hidden: the interface draws the disc around it and
+      // explains the offset.
+      centre: { lat: covering.lat, lon: covering.lon },
+      radius: covering.radius,
+      covering: true,
+    });
   }
 
   if (CACHE_ONLY) {
