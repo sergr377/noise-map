@@ -57,10 +57,6 @@ export function utmSrid(lat, lon) {
 }
 
 /**
- * `out meta` is deliberate: the osmosis XML reader used by Import_OSM expects
- * the version attribute that only the meta output carries.
- */
-/**
  * EWKT rectangle in WGS84. A rectangle is not a simplification: `Delaunay_Grid`
  * reprojects the fence and then keeps only its envelope (`setMainEnvelope` in
  * the block's source), so any other shape would end up as this same rectangle.
@@ -79,6 +75,13 @@ export function bboxEwkt({ south, west, north, east }) {
   return `SRID=4326;POLYGON((${ring}))`;
 }
 
+/**
+ * The Overpass query behind every extract: roads to emit from, buildings to
+ * screen with, and the land cover the ground absorption is read from.
+ *
+ * `out meta` is deliberate: the osmosis XML reader used by Import_OSM expects
+ * the version attribute that only the meta output carries.
+ */
 export function overpassQuery({ south, west, north, east }) {
   const bbox = `${south},${west},${north},${east}`;
   return `[out:xml][timeout:180];
