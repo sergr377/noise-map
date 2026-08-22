@@ -7,16 +7,10 @@
  * Usage: node scripts/compare-runs.mjs <a.geojson> <b.geojson> [period]
  */
 import { readFile } from 'node:fs/promises';
+import { bandMid } from './lib.mjs';
 
 const [fileA, fileB, period = 'DEN'] = process.argv.slice(2);
 if (!fileA || !fileB) throw new Error('нужны два файла для сравнения');
-
-function bandMid(label) {
-  if (label.startsWith('-')) return 32.5;
-  if (label.endsWith('+')) return 82.5;
-  const [a, b] = label.split('-').map(Number);
-  return (a + b) / 2;
-}
 
 /**
  * Planar area via the shoelace formula on a local equirectangular projection.

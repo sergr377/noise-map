@@ -8,6 +8,7 @@
  * Usage: node scripts/sanity-check.mjs <geojson> [period]
  */
 import { readFile } from 'node:fs/promises';
+import { bandMid } from './lib.mjs';
 
 const file = process.argv[2];
 const period = process.argv[3] ?? 'DEN';
@@ -15,14 +16,6 @@ const period = process.argv[3] ?? 'DEN';
 const gj = JSON.parse(await readFile(file, 'utf8'));
 const feats = gj.features.filter((f) => f.properties?.PERIOD === period);
 if (feats.length === 0) throw new Error(`no features for period ${period}`);
-
-// Band midpoints. ISOLABEL is "-35", "35-40", ..., "80+".
-function bandMid(label) {
-  if (label.startsWith('-')) return 32.5;
-  if (label.endsWith('+')) return 82.5;
-  const [a, b] = label.split('-').map(Number);
-  return (a + b) / 2;
-}
 
 function centroid(coords) {
   let sx = 0;

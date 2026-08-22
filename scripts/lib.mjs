@@ -57,6 +57,20 @@ export function utmSrid(lat, lon) {
 }
 
 /**
+ * Midpoint of an isophone band, in dB(A). ISOLABEL comes out of
+ * `Create_Isosurface` as "-35", "35-40", ..., "80+", so the two open-ended
+ * bands have no midpoint of their own: they are given the same 5 dB width as
+ * every other band, which is what makes an area-weighted mean over all bands
+ * comparable between two runs.
+ */
+export function bandMid(label) {
+  if (label.startsWith('-')) return 32.5;
+  if (label.endsWith('+')) return 82.5;
+  const [a, b] = label.split('-').map(Number);
+  return (a + b) / 2;
+}
+
+/**
  * EWKT rectangle in WGS84. A rectangle is not a simplification: `Delaunay_Grid`
  * reprojects the fence and then keeps only its envelope (`setMainEnvelope` in
  * the block's source), so any other shape would end up as this same rectangle.
