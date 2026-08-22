@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import type { Stage } from '../../shared/stages.mjs';
 
 /** Repository root: this file lives two levels down, both in src/ and in dist/. */
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -187,19 +188,10 @@ export const JOB_PARAMS = {
  */
 export const CACHE_GRID_METERS = 100;
 
-export type Stage =
-  | 'queued'
-  | 'overpass'
-  | 'import'
-  | 'grid'
-  | 'preview'
-  | 'propagation'
-  | 'isosurface'
-  | 'dissolve'
-  | 'export'
-  | 'done'
-  | 'error'
-  | 'cancelled';
+// Shared with the browser and with run-job.mjs, which emits these names as
+// markers. Re-exported so the modules importing Stage from './config.js' —
+// queue.ts, index.ts — keep their single import.
+export type { Stage };
 
 /** Stages after which nothing more will be published — the stream can close. */
 export const TERMINAL_STAGES: ReadonlySet<Stage> = new Set<Stage>(['done', 'error', 'cancelled']);

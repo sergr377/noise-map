@@ -15,6 +15,7 @@ import {
 } from './config.js';
 import { cacheKey, quantize, writeCache } from './cache.js';
 import { lineSplitter } from '../../shared/lines.mjs';
+import { isStage } from '../../shared/stages.mjs';
 
 export interface JobState {
   id: string;
@@ -218,7 +219,11 @@ function runPipeline(job: Job): Promise<void> {
       const [, kind, payload] = marker as unknown as [string, string, string];
 
       if (kind === 'STAGE') {
-        setStage(job, payload.trim() as Stage);
+        const stage = payload.trim();
+        // The name comes out of the pipeline as text. Checking it against the
+        // shared list beats casting: an unknown stage would otherwise reach
+        // the client as a state with no label at all.
+        if (isStage(stage)) setStage(job, stage);
       } else if (kind === 'PROGRESS') {
         const [doneCells, totalCells] = payload.trim().split(/\s+/).map(Number);
         // Both propagation passes report cells, so the span is the one of the

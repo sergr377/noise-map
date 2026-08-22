@@ -1,16 +1,8 @@
-export type Stage =
-  | 'queued'
-  | 'overpass'
-  | 'import'
-  | 'grid'
-  | 'preview'
-  | 'propagation'
-  | 'isosurface'
-  | 'dissolve'
-  | 'export'
-  | 'done'
-  | 'error'
-  | 'cancelled';
+import type { Stage } from '../../shared/stages.mjs';
+// One declaration for both sides: the server publishes these names, and this
+// file is where the browser reads them. Re-exported because the components
+// import Stage from './api'.
+export type { Stage };
 
 export interface JobState {
   id: string;
