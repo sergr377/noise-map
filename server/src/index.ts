@@ -406,7 +406,7 @@ async function sendScratchMap(req: http.IncomingMessage, res: http.ServerRespons
     'Cache-Control': 'no-store',
     ...CORS,
   };
-  if (/gzip/.test(req.headers['accept-encoding'] ?? '')) {
+  if (/\bgzip\b/.test(req.headers['accept-encoding'] ?? '')) {
     res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip' });
     return res.end(await gzipAsync(data));
   }
