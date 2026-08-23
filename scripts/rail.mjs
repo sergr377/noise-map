@@ -16,9 +16,9 @@
  * an official European default table behind it.
  */
 import { writeFile } from 'node:fs/promises';
-import './lib.mjs'; // installs the proxy dispatcher
-
-const OVERPASS = 'https://overpass-api.de/api/interpreter';
+// Imported for the proxy dispatcher it installs, and for the Overpass client
+// that knows about mirrors and retries.
+import { overpassFetch } from './lib.mjs';
 
 /** Line speed when OSM does not say. Suburban and mainline differ enough to split. */
 const ASSUMED_SPEED = { main: 100, branch: 60 };
@@ -60,18 +60,14 @@ export async function fetchRail(bbox, outPath) {
 );
 out tags geom;`;
 
-  const res = await fetch(OVERPASS, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': 'noise-map/0.1 (rail extraction)',
-    },
-    body: new URLSearchParams({ data: query }),
-    signal: AbortSignal.timeout(240_000),
+  const { body } = await overpassFetch(query, {
+    userAgent: 'noise-map/0.1 (rail extraction)',
+    // An error document carries a remark and no elements; a legitimately empty
+    // answer — a box with no track in it — carries elements and nothing else.
+    hasPayload: (json) => !json.includes('"remark"'),
   });
-  if (!res.ok) throw new Error(`Overpass HTTP ${res.status} при загрузке путей`);
 
-  const ways = (await res.json()).elements ?? [];
+  const ways = JSON.parse(body).elements ?? [];
   const features = [];
 
   for (const way of ways) {

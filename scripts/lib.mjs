@@ -120,8 +120,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * attempt is not a meaningful test of availability. Rounds alternate endpoints
  * and back off between passes.
  */
-export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
-  const query = overpassQuery(bbox);
+/**
+ * One Overpass query, with the retries the public instances make necessary.
+ *
+ * Everything about talking to Overpass lives here rather than at the call
+ * sites: the mirrors, the back-off between rounds, the fact that a rate limit
+ * arrives as a 200 with an apology inside, and the diagnosis of a failure that
+ * Node's fetch reduces to the words "fetch failed".
+ *
+ * `hasPayload` is the caller's job because only it knows what its own answer
+ * should look like — road data comes back as XML, rail as JSON.
+ */
+export async function overpassFetch(
+  query,
+  { rounds = 3, userAgent = 'noise-map/0.1', hasPayload = () => true } = {},
+) {
   const errors = [];
 
   for (let round = 0; round < rounds; round++) {
@@ -132,7 +145,7 @@ export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
           method: 'POST',
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent': 'noise-map/0.1 (OSM road noise mapping)',
+            'User-Agent': userAgent,
           },
           body: new URLSearchParams({ data: query }),
           signal: AbortSignal.timeout(240_000),
@@ -140,13 +153,13 @@ export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
         if (!res.ok) {
           throw new Error(`HTTP ${res.status} ${res.statusText}`);
         }
-        const xml = await res.text();
-        // Overpass reports rate limits and timeouts as a 200 with an error document.
-        if (xml.includes('<remark>') && !xml.includes('<node')) {
-          throw new Error(`remark: ${xml.slice(0, 300)}`);
+        const body = await res.text();
+        // Overpass reports rate limits and timeouts as a 200 with an error
+        // document: <remark> in XML, "remark" in JSON, and no data either way.
+        if (!hasPayload(body)) {
+          throw new Error(`empty answer: ${body.slice(0, 300)}`);
         }
-        await writeFile(outPath, xml, 'utf8');
-        return { bytes: Buffer.byteLength(xml), path: outPath, endpoint };
+        return { body, endpoint };
       } catch (err) {
         // Node's fetch reports every network problem as a bare "fetch failed".
         // What distinguishes "the service is down" from "nothing leaves this
@@ -165,4 +178,15 @@ export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
     ? `proxy: ${proxyUrl}`
     : 'no proxy configured (HTTPS_PROXY and HTTP_PROXY are empty)';
   throw new Error(`all Overpass endpoints failed, ${proxyNote}\n  ${errors.join('\n  ')}`);
+}
+
+/** Road and building data for one bounding box, written out as OSM XML. */
+export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
+  const { body, endpoint } = await overpassFetch(overpassQuery(bbox), {
+    rounds,
+    userAgent: 'noise-map/0.1 (OSM road noise mapping)',
+    hasPayload: (xml) => xml.includes('<node'),
+  });
+  await writeFile(outPath, body, 'utf8');
+  return { bytes: Buffer.byteLength(body), path: outPath, endpoint };
 }

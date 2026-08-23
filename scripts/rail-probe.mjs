@@ -7,7 +7,10 @@
  *
  * Usage: node scripts/rail-probe.mjs [lat] [lon] [radius]
  */
-import './lib.mjs'; // installs the proxy dispatcher
+// Imported for the proxy dispatcher it installs, and for the Overpass client
+// that knows about mirrors and retries — the public instance answers 429 often
+// enough that a single attempt says nothing about coverage.
+import { overpassFetch } from './lib.mjs';
 
 const lat = Number(process.argv[2] ?? 55.776);
 const lon = Number(process.argv[3] ?? 37.656);
@@ -21,19 +24,11 @@ const query = `[out:json][timeout:120];
 (way["railway"](${bbox}););
 out tags;`;
 
-const res = await fetch('https://overpass-api.de/api/interpreter', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/x-www-form-urlencoded',
-    'User-Agent': 'noise-map/0.1 (rail coverage probe)',
-  },
-  body: new URLSearchParams({ data: query }),
-  signal: AbortSignal.timeout(180_000),
+const { body } = await overpassFetch(query, {
+  userAgent: 'noise-map/0.1 (rail coverage probe)',
+  hasPayload: (json) => !json.includes('"remark"'),
 });
-if (!res.ok) {
-  throw new Error(`Overpass HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`);
-}
-const ways = (await res.json()).elements ?? [];
+const ways = JSON.parse(body).elements ?? [];
 
 console.log(`точка ${lat},${lon}, радиус ${radius} м`);
 console.log(`объектов railway=*: ${ways.length}`);
