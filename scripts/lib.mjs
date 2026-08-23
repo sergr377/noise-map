@@ -10,8 +10,10 @@ import { ProxyAgent, setGlobalDispatcher } from 'undici';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 try {
   process.loadEnvFile(path.join(ROOT, '.env'));
-} catch {
-  /* no .env present */
+} catch (err) {
+  // Same rule as the server: a missing .env is ordinary, anything else is not.
+  // A script that silently loses HTTPS_PROXY looks like Overpass being down.
+  if (err.code !== 'ENOENT') throw err;
 }
 
 // Without this, resolution can hand back a AAAA record first and undici stalls

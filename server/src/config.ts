@@ -9,8 +9,13 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 // .env is optional — the server runs fine without it, only the frontend needs a key.
 try {
   process.loadEnvFile(path.join(ROOT, '.env'));
-} catch {
-  /* no .env present */
+} catch (err) {
+  // Only a missing file is ordinary. Anything else — no permission to read it,
+  // a directory in its place, a Node too old to have loadEnvFile at all — also
+  // leaves every variable unset, and that failure then looks like a broken
+  // location or a dead Overpass rather than a server started without its
+  // configuration. Once was enough.
+  if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
 }
 
 // Node's fetch ignores HTTP(S)_PROXY, unlike curl or PowerShell. On a machine
