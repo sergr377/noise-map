@@ -13,6 +13,7 @@ import { useComputedAreas, type Viewport } from './useComputedAreas';
 import { useNoiseJob } from './useNoiseJob';
 import { PERIODS, readLocationFromUrl, readPeriodFromUrl, usePeriodInUrl } from './urlState';
 import { fetchConfig, type Centre, type Period, type Place } from './api';
+import { isMapTimeout } from './mapErrors';
 
 /**
  * Composition root: the map, the panel, and the wiring between them.
@@ -28,7 +29,7 @@ export default function App() {
   // readable message instead of an empty page — the bootstrap throws, and a
   // throw during module evaluation would take the whole app down with it.
   const [maps, setMaps] = useState<typeof Ymaps | null>(null);
-  const [mapError, setMapError] = useState<string | null>(null);
+  const [mapError, setMapError] = useState<{ message: string; timedOut: boolean } | null>(null);
   /**
    * Radius a click covers. Asked of the server rather than kept as a constant
    * here: it is a calculation parameter, and a second copy would eventually
@@ -109,7 +110,9 @@ export default function App() {
         if (!dropped) setMaps(module);
       })
       .catch((err: unknown) => {
-        if (!dropped) setMapError((err as Error).message);
+        if (!dropped) {
+          setMapError({ message: (err as Error).message, timedOut: isMapTimeout(err) });
+        }
       });
     return () => {
       dropped = true;
@@ -188,14 +191,21 @@ export default function App() {
             {mapError ? (
               <div className="map-error">
                 <strong>Карта не загрузилась</strong>
-                <p>{mapError}</p>
-                <p className="note">
-                  Яндекс отвечает <code>Invalid api key</code> в двух разных случаях, не различая
-                  их: к ключу не подключён JavaScript API, либо для него не заданы обязательные
-                  ограничения по HTTP Referer или IP — без них ключ JS API 3.0 не работает.
-                  Проверьте оба пункта в кабинете разработчика; для локальной разработки в поле
-                  Referer добавляется <code>localhost</code>, без протокола и порта.
-                </p>
+                <p>{mapError.message}</p>
+                {mapError.timedOut ? (
+                  <p className="note">
+                    Ключ и настройки тут ни при чём: ответа просто не дождались. Проверьте сеть и
+                    перезагрузите страницу — остальное на ней работает и без карты.
+                  </p>
+                ) : (
+                  <p className="note">
+                    Яндекс отвечает <code>Invalid api key</code> в двух разных случаях, не различая
+                    их: к ключу не подключён JavaScript API, либо для него не заданы обязательные
+                    ограничения по HTTP Referer или IP — без них ключ JS API 3.0 не работает.
+                    Проверьте оба пункта в кабинете разработчика; для локальной разработки в поле
+                    Referer добавляется <code>localhost</code>, без протокола и порта.
+                  </p>
+                )}
               </div>
             ) : (
               <span className="note">Загружаю карту…</span>
