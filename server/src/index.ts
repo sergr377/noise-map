@@ -5,6 +5,7 @@ import path from 'node:path';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import {
+  ALLOWED_ORIGINS,
   CACHE_ONLY,
   JOB_PARAMS,
   KILL_GRACE_MS,
@@ -37,11 +38,29 @@ const gzipAsync = promisify(gzip);
  */
 const AREAS_PER_REQUEST = 500;
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type',
-  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-};
+/**
+ * CORS-заголовки на ответ. Ставятся один раз, в начале обработки запроса:
+ * writeHead ниже добавляет свои к уже выставленным, а не заменяет их, так
+ * что каждому маршруту не нужно помнить про заголовки самому.
+ *
+ * Пустой ALLOWED_ORIGINS означает звёздочку — публичный API, как и было.
+ * Со списком отвечаем эхом того источника, который в нём есть, и молчим для
+ * остальных: браузер сам не пустит ответ без заголовка. Vary: Origin —
+ * чтобы кэш не отдал ответ, выписанный на другой источник.
+ */
+function applyCors(req: http.IncomingMessage, res: http.ServerResponse) {
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  if (ALLOWED_ORIGINS.length === 0) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    return;
+  }
+  res.setHeader('Vary', 'Origin');
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+}
 
 function sendJson(
   res: http.ServerResponse,
@@ -52,7 +71,6 @@ function sendJson(
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    ...CORS,
     ...headers,
   });
   res.end(payload);
@@ -288,7 +306,6 @@ function handleEvents(res: http.ServerResponse, id: string, ip: string) {
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
-    ...CORS,
   });
 
   // subscribe() invokes the listener synchronously with the current state. For a
@@ -348,7 +365,6 @@ async function handleResult(req: http.IncomingMessage, res: http.ServerResponse,
   const headers: Record<string, string> = {
     'Content-Type': 'application/geo+json; charset=utf-8',
     'Cache-Control': 'public, max-age=86400',
-    ...CORS,
   };
 
   // These files are mostly coordinate digits and compress by roughly 5x.
@@ -404,7 +420,6 @@ async function sendScratchMap(req: http.IncomingMessage, res: http.ServerRespons
   const headers: Record<string, string> = {
     'Content-Type': 'application/geo+json; charset=utf-8',
     'Cache-Control': 'no-store',
-    ...CORS,
   };
   if (/\bgzip\b/.test(req.headers['accept-encoding'] ?? '')) {
     res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip' });
@@ -492,9 +507,10 @@ async function serveStatic(res: http.ServerResponse, pathname: string) {
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    applyCors(req, res);
 
     if (req.method === 'OPTIONS') {
-      res.writeHead(204, CORS);
+      res.writeHead(204);
       return res.end();
     }
     // Liveness probes come from the platform, not from users, and throttling

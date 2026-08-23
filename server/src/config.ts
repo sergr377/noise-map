@@ -51,6 +51,21 @@ export const WEB_DIST = path.join(ROOT, 'dist-web');
  * happen. With this set the API still serves anything already in the cache.
  */
 export const CACHE_ONLY = process.env.CACHE_ONLY === '1';
+/**
+ * Кто может обращаться к API из браузера. Пусто — любой: для публичного
+ * read-mostly сервиса без cookie и без аутентификации это защитимый выбор,
+ * и он остаётся значением по умолчанию.
+ *
+ * Но POST /api/noise не бесплатен: холодный клик занимает все ядра на
+ * минуты и тратит бюджет расчётов посетителя. Пока стоит звёздочка, любой
+ * сторонний сайт может встроить этот вызов и потратить чужой бюджет — то
+ * самое, от чего ключ Яндекс.Карт защищён ограничением по Referer. Список
+ * источников через запятую закрывает эту дверь в проде.
+ */
+export const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 export const RUN_JOB_SCRIPT = path.join(ROOT, 'scripts', 'run-job.mjs');
 
 /**
