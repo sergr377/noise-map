@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { CACHE_DIR, CACHE_GRID_METERS, JOB_PARAMS } from './config.js';
+import { CACHE_DIR, CACHE_GRID_METERS, ENGINE_IS_REAL, JOB_PARAMS } from './config.js';
 
 /**
  * Snap a coordinate to a fixed grid so nearby clicks share a cache entry.
@@ -32,6 +32,10 @@ export function cacheKey(lat: number, lon: number): string {
     lat: q.lat.toFixed(5),
     lon: q.lon.toFixed(5),
     ...JOB_PARAMS,
+    // A map that was never computed must not be reachable by a server that
+    // computes. Separate directories are the first line of that; this is the
+    // one that holds even when a test is pointed at the real cache by mistake.
+    ...(ENGINE_IS_REAL ? {} : { engine: 'stub' }),
   });
   return createHash('sha1').update(payload).digest('hex').slice(0, 16);
 }

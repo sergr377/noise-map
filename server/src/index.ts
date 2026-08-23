@@ -7,10 +7,12 @@ import { promisify } from 'node:util';
 import {
   ALLOWED_ORIGINS,
   CACHE_ONLY,
+  ENGINE_IS_REAL,
   JOB_PARAMS,
   KILL_GRACE_MS,
   PORT,
   PROXY_URL,
+  RUN_JOB_SCRIPT,
   STAGE_LABELS,
   TERMINAL_STAGES,
   WEB_DIST,
@@ -636,7 +638,10 @@ const server = http.createServer(async (req, res) => {
     // Liveness probes come from the platform, not from users, and throttling
     // them would make the service look dead exactly when it is under load.
     if (url.pathname === '/api/health') {
-      return sendJson(res, 200, { ok: true });
+      // `engine` is only ever absent from a normal server. It is reported so a
+      // check running against the wrong process — a stub left over from a test
+      // run — finds out from the first request rather than from the map.
+      return sendJson(res, 200, { ok: true, ...(ENGINE_IS_REAL ? {} : { engine: 'stub' }) });
     }
 
     const ip = clientIp(req);
@@ -683,6 +688,12 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`noise-map api on http://localhost:${PORT}`);
+  if (!ENGINE_IS_REAL) {
+    console.warn(
+      `ВНИМАНИЕ: расчёт подменён на ${RUN_JOB_SCRIPT} (RUN_JOB_SCRIPT). ` +
+        'Карты будут выдуманными — это режим для проверки HTTP-слоя, не для людей.',
+    );
+  }
   // Said out loud because its absence is otherwise invisible until every job
   // fails: where Overpass is only reachable through a local proxy, a server
   // started without HTTPS_PROXY cannot fetch anything, and that surfaces as a

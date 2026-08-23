@@ -1,8 +1,12 @@
-# Everything here runs without Java, without the NoiseModelling distribution
-# and without network access to Overpass — which is the whole reason the real
-# end-to-end check (scripts/smoke-api.mjs) is not part of it. That one starts an
-# actual calculation: minutes of CPU across every core, a 148 MB engine that is
-# not in git, and live OSM data. Run it by hand against a running server.
+# Everything here runs without Java, without the NoiseModelling distribution and
+# without network access to Overpass — because none of those are what the HTTP
+# layer is made of. The end-to-end check (scripts/smoke-api.mjs) does run here,
+# against a server whose calculation is replaced by scripts/fake-job.mjs: same
+# marker protocol, same files, no acoustics. So the queue, the progress stream,
+# cancellation, the cache and the limiter are gated by CI; whether the numbers
+# on a real map are right is not, and never will be from a free runner —
+# sanity-check.mjs and compare-runs.mjs remain a job for a human with the
+# engine installed.
 name: CI
 
 on:
@@ -40,6 +44,35 @@ jobs:
       # check needs the compiled server. ~88 000 points, a couple of seconds.
       - name: Идемпотентность сетки кэша
         run: node scripts/check-quantize.mjs
+
+      # The HTTP layer end to end, against a stubbed engine. Frames and the rate
+      # limiter are switched on deliberately: with the defaults the smoke test
+      # reports those checks as skipped — loopback is exempt from the limiter
+      # and frames are off — and they are exactly the routes nothing else
+      # covers. A cold run takes about fifteen seconds.
+      - name: Сквозная проверка HTTP-слоя
+        env:
+          PORT: 8787
+          RUN_JOB_SCRIPT: scripts/fake-job.mjs
+          # Somewhere disposable: these maps are invented, and the cache key
+          # marks them as such so a real server could not read them anyway.
+          CACHE_DIR: ${{ runner.temp }}/noise-cache
+          FAKE_JOB_MS: 6000
+          PARTIAL_INTERVAL_MS: 800
+          RATE_LIMIT_LOOPBACK: 1
+        run: |
+          node server/dist/index.js &
+          server=$!
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8787/api/health > /dev/null && break
+            sleep 1
+          done
+          set +e
+          node scripts/smoke-api.mjs
+          status=$?
+          set -e
+          kill $server 2> /dev/null || true
+          exit $status
 
       # No VITE_YANDEX_API_KEY here on purpose: the key is missing at build time
       # and the bundle still has to come out. It fails in the browser instead,

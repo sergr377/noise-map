@@ -41,7 +41,14 @@ export const GEOCODER_KEY = process.env.YANDEX_GEOCODER_KEY ?? '';
  */
 export const MAX_CONCURRENT_JOBS = Number(process.env.MAX_CONCURRENT_JOBS ?? 1);
 
-export const CACHE_DIR = path.join(ROOT, 'cache');
+/**
+ * Where finished maps are kept. Overridable so a run that is not producing real
+ * maps — see RUN_JOB_SCRIPT below — can be pointed somewhere disposable and
+ * leave nothing behind.
+ */
+export const CACHE_DIR = process.env.CACHE_DIR
+  ? path.resolve(ROOT, process.env.CACHE_DIR)
+  : path.join(ROOT, 'cache');
 
 /**
  * Built frontend. When present the API also serves it, so a deployment is one
@@ -71,7 +78,27 @@ export const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
-export const RUN_JOB_SCRIPT = path.join(ROOT, 'scripts', 'run-job.mjs');
+const REAL_JOB_SCRIPT = path.join(ROOT, 'scripts', 'run-job.mjs');
+
+/**
+ * The pipeline the server spawns for a job.
+ *
+ * Overridable because the HTTP layer and the engine are separable, and only one
+ * of them can be tested on an ordinary runner: `scripts/fake-job.mjs` speaks
+ * the same marker protocol, writes the same files and computes nothing, which
+ * is what lets `smoke-api.mjs` gate a build (see .github/workflows/ci.yml). A
+ * relative path is taken from the repository root.
+ */
+export const RUN_JOB_SCRIPT = process.env.RUN_JOB_SCRIPT
+  ? path.resolve(ROOT, process.env.RUN_JOB_SCRIPT)
+  : REAL_JOB_SCRIPT;
+
+/**
+ * Whether the maps this server produces are computed at all. A server quietly
+ * serving invented isophones is a worse failure than one that is plainly down,
+ * so this is said at startup and answered by /api/health.
+ */
+export const ENGINE_IS_REAL = RUN_JOB_SCRIPT === REAL_JOB_SCRIPT;
 
 /**
  * How often a running job exports the map of what it has computed so far. Zero
