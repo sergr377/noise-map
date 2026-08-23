@@ -46,12 +46,16 @@ export async function writeDemAsc(bbox, outPath, { zoom = 12, cellsize = 0.00025
   const minTileY = Math.floor(latToTileY(north, zoom));
   const maxTileY = Math.floor(latToTileY(south, zoom));
 
-  const tiles = new Map();
+  // Tiles do not depend on each other, and the wait is almost all latency:
+  // fetched one after another they add up, fetched together they overlap. The
+  // count is small by construction — a 750 m disc at zoom 12 is a handful — so
+  // there is nothing here to throttle.
+  const wanted = [];
   for (let x = minTileX; x <= maxTileX; x++) {
-    for (let y = minTileY; y <= maxTileY; y++) {
-      tiles.set(`${x}/${y}`, await fetchTile(zoom, x, y));
-    }
+    for (let y = minTileY; y <= maxTileY; y++) wanted.push([x, y]);
   }
+  const fetched = await Promise.all(wanted.map(([x, y]) => fetchTile(zoom, x, y)));
+  const tiles = new Map(wanted.map(([x, y], i) => [`${x}/${y}`, fetched[i]]));
 
   const cols = Math.max(2, Math.ceil((east - west) / cellsize));
   const rows = Math.max(2, Math.ceil((north - south) / cellsize));
