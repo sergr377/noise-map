@@ -221,8 +221,8 @@ async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse,
     body = (await readBody(req)) as { lat?: unknown; lon?: unknown; preview?: unknown } | null;
   } catch (err) {
     if (!(err instanceof BodyTooLargeError)) throw err;
-    // Connection: close — остаток тела, который клиент ещё шлёт, дочитывать
-    // незачем, а без этого он копился бы в сокете и после ответа.
+    // Connection: close — whatever the client is still sending will never be
+    // read, and without this it would go on filling the socket after the answer.
     return sendJson(
       res,
       413,

@@ -111,9 +111,9 @@ export default function MapCanvas({
   // is never touched would never report where it is looking. Asking it once, on
   // mount, is what makes the shaded areas appear before the first pan.
   const mapRef = useRef<ComponentRef<typeof YMap>>(null);
-  // Спрашиваем один раз, на монтировании: с onViewport в зависимостях цикл опроса
-  // перезапускался бы на каждое изменение колбэка и спорил бы с событием камеры.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: намеренно один раз
+  // Asked once, on mount: with onViewport in the dependencies the retry loop
+  // would restart whenever the callback changed and fight the camera event.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deliberately once
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let tries = 0;

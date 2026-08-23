@@ -36,10 +36,10 @@ export function useElapsedSeconds(running: boolean, reported?: number): number {
     if (reported !== undefined) originRef.current = Date.now() - reported;
   }, [reported]);
 
-  // reported в зависимостях не читается телом эффекта, но нужен: приход нового
-  // отчёта обязан пересчитать счётчик от нового начала отсчёта немедленно, а не
-  // через секунду, когда сработает очередной тик.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: перезапуск здесь и есть смысл зависимости
+  // The body never reads `reported`, but the dependency is the point: a fresh
+  // report has to re-anchor the count at once, not a second later when the next
+  // tick happens to fire.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-running is what the dependency is for
   useEffect(() => {
     if (!running) {
       setSeconds(0);

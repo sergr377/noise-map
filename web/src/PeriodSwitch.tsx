@@ -10,10 +10,10 @@ interface Props {
 
 export default function PeriodSwitch({ period, onChange, disabled }: Props) {
   return (
-    // <fieldset> тянет за собой собственную рамку и отступы, а группа здесь —
-    // ряд кнопок-переключателей, а не поля формы: роль и подпись дают ту же
-    // семантику, не заставляя переписывать стили.
-    // biome-ignore lint/a11y/useSemanticElements: роль здесь вместо fieldset намеренно
+    // <fieldset> brings its own border and padding, and this is a row of toggle
+    // buttons rather than form fields: the role and the label give the same
+    // semantics without rewriting the styles.
+    // biome-ignore lint/a11y/useSemanticElements: the role stands in for fieldset on purpose
     <div className="periods" role="group" aria-label="Период суток">
       {PERIODS.map((p) => (
         <button

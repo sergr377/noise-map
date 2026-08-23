@@ -44,9 +44,9 @@ export function useComputedAreas(view: Viewport | null) {
   // refresh goes through exactly the same path as a camera move.
   const [refreshes, setRefreshes] = useState(0);
 
-  // refreshes телом эффекта не читается — он и есть способ его перезапустить:
-  // после расчёта камера стоит на месте, и без этого никто бы не переспросил.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: перезапуск и есть смысл зависимости
+  // The body never reads `refreshes` — it is the way to re-run this: after a
+  // calculation the camera is standing still, so nothing else would ask again.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-running is what the dependency is for
   useEffect(() => {
     if (!view) return;
     if (view.zoom < MIN_AREA_ZOOM) {

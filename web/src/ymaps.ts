@@ -29,8 +29,8 @@ function withTimeout<T>(work: Promise<T>, message: string): Promise<T> {
     work,
     new Promise<never>((_, reject) => {
       setTimeout(() => {
-        // Названо, чтобы интерфейс отличил обрыв сети от отвергнутого ключа:
-        // подсказка про кабинет разработчика к таймауту отношения не имеет.
+        // Named so the interface can tell a stalled network from a refused key:
+        // the advice about the developer console does not apply to a timeout.
         const timeout = new Error(message);
         timeout.name = MAP_LOAD_TIMEOUT;
         reject(timeout);
