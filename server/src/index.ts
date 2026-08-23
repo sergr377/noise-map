@@ -86,9 +86,31 @@ function sendTooMany(res: http.ServerResponse, verdict: Verdict, message: string
   );
 }
 
+/**
+ * Ceiling on a request body. The only body this API reads is
+ * {lat, lon, preview} — tens of bytes — so anything approaching this is not a
+ * client of ours. The rate limiter counts requests, not their size, and a
+ * public POST endpoint has no business collecting an unbounded string in
+ * memory just to find out it was never valid JSON.
+ */
+const MAX_BODY_BYTES = 8 * 1024;
+
+class BodyTooLargeError extends Error {}
+
 async function readBody(req: http.IncomingMessage): Promise<unknown> {
+  // Content-Length is a claim, not a guarantee, so it is a shortcut rather
+  // than the check: an honest oversized body is refused before a byte of it
+  // is read, and a lying one runs into the counter below.
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new BodyTooLargeError();
+
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_BODY_BYTES) throw new BodyTooLargeError();
+    chunks.push(chunk as Buffer);
+  }
   if (chunks.length === 0) return {};
   try {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -194,7 +216,20 @@ async function handleAreas(res: http.ServerResponse, params: URLSearchParams) {
 
 /** POST /api/noise — resolve a click to either a cached result or a running job. */
 async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse, ip: string) {
-  const body = (await readBody(req)) as { lat?: unknown; lon?: unknown; preview?: unknown } | null;
+  let body: { lat?: unknown; lon?: unknown; preview?: unknown } | null;
+  try {
+    body = (await readBody(req)) as { lat?: unknown; lon?: unknown; preview?: unknown } | null;
+  } catch (err) {
+    if (!(err instanceof BodyTooLargeError)) throw err;
+    // Connection: close — остаток тела, который клиент ещё шлёт, дочитывать
+    // незачем, а без этого он копился бы в сокете и после ответа.
+    return sendJson(
+      res,
+      413,
+      { error: `тело запроса больше ${MAX_BODY_BYTES} байт` },
+      { Connection: 'close' },
+    );
+  }
   const point = readPoint(body?.lat, body?.lon);
 
   if (!point) {
