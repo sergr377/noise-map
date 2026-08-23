@@ -8,6 +8,7 @@
  * Usage: node scripts/sanity-check.mjs <geojson> [period]
  */
 import { readFile } from 'node:fs/promises';
+import { bandMid } from './lib.mjs';
 
 const file = process.argv[2];
 const period = process.argv[3] ?? 'DEN';
@@ -15,14 +16,6 @@ const period = process.argv[3] ?? 'DEN';
 const gj = JSON.parse(await readFile(file, 'utf8'));
 const feats = gj.features.filter((f) => f.properties?.PERIOD === period);
 if (feats.length === 0) throw new Error(`no features for period ${period}`);
-
-// Band midpoints. ISOLABEL is "-35", "35-40", ..., "80+".
-function bandMid(label) {
-  if (label.startsWith('-')) return 32.5;
-  if (label.endsWith('+')) return 82.5;
-  const [a, b] = label.split('-').map(Number);
-  return (a + b) / 2;
-}
 
 function centroid(coords) {
   let sx = 0;
@@ -60,8 +53,7 @@ const items = feats.flatMap((f) =>
 const latRef = items[0].c[1];
 const mPerDegLat = 111320;
 const mPerDegLon = 111320 * Math.cos((latRef * Math.PI) / 180);
-const dist = (a, b) =>
-  Math.hypot((a[0] - b[0]) * mPerDegLon, (a[1] - b[1]) * mPerDegLat);
+const dist = (a, b) => Math.hypot((a[0] - b[0]) * mPerDegLon, (a[1] - b[1]) * mPerDegLat);
 
 const loud = items.filter((i) => i.level >= 70);
 const quiet = items.filter((i) => i.level <= 47.5);

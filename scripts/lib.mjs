@@ -10,8 +10,10 @@ import { ProxyAgent, setGlobalDispatcher } from 'undici';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 try {
   process.loadEnvFile(path.join(ROOT, '.env'));
-} catch {
-  /* no .env present */
+} catch (err) {
+  // Same rule as the server: a missing .env is ordinary, anything else is not.
+  // A script that silently loses HTTPS_PROXY looks like Overpass being down.
+  if (err.code !== 'ENOENT') throw err;
 }
 
 // Without this, resolution can hand back a AAAA record first and undici stalls
@@ -57,9 +59,19 @@ export function utmSrid(lat, lon) {
 }
 
 /**
- * `out meta` is deliberate: the osmosis XML reader used by Import_OSM expects
- * the version attribute that only the meta output carries.
+ * Midpoint of an isophone band, in dB(A). ISOLABEL comes out of
+ * `Create_Isosurface` as "-35", "35-40", ..., "80+", so the two open-ended
+ * bands have no midpoint of their own: they are given the same 5 dB width as
+ * every other band, which is what makes an area-weighted mean over all bands
+ * comparable between two runs.
  */
+export function bandMid(label) {
+  if (label.startsWith('-')) return 32.5;
+  if (label.endsWith('+')) return 82.5;
+  const [a, b] = label.split('-').map(Number);
+  return (a + b) / 2;
+}
+
 /**
  * EWKT rectangle in WGS84. A rectangle is not a simplification: `Delaunay_Grid`
  * reprojects the fence and then keeps only its envelope (`setMainEnvelope` in
@@ -79,6 +91,13 @@ export function bboxEwkt({ south, west, north, east }) {
   return `SRID=4326;POLYGON((${ring}))`;
 }
 
+/**
+ * The Overpass query behind every extract: roads to emit from, buildings to
+ * screen with, and the land cover the ground absorption is read from.
+ *
+ * `out meta` is deliberate: the osmosis XML reader used by Import_OSM expects
+ * the version attribute that only the meta output carries.
+ */
 export function overpassQuery({ south, west, north, east }) {
   const bbox = `${south},${west},${north},${east}`;
   return `[out:xml][timeout:180];
@@ -101,8 +120,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * attempt is not a meaningful test of availability. Rounds alternate endpoints
  * and back off between passes.
  */
-export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
-  const query = overpassQuery(bbox);
+/**
+ * One Overpass query, with the retries the public instances make necessary.
+ *
+ * Everything about talking to Overpass lives here rather than at the call
+ * sites: the mirrors, the back-off between rounds, the fact that a rate limit
+ * arrives as a 200 with an apology inside, and the diagnosis of a failure that
+ * Node's fetch reduces to the words "fetch failed".
+ *
+ * `hasPayload` is the caller's job because only it knows what its own answer
+ * should look like — road data comes back as XML, rail as JSON.
+ */
+export async function overpassFetch(
+  query,
+  { rounds = 3, userAgent = 'noise-map/0.1', hasPayload = () => true } = {},
+) {
   const errors = [];
 
   for (let round = 0; round < rounds; round++) {
@@ -113,7 +145,7 @@ export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
           method: 'POST',
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent': 'noise-map/0.1 (OSM road noise mapping)',
+            'User-Agent': userAgent,
           },
           body: new URLSearchParams({ data: query }),
           signal: AbortSignal.timeout(240_000),
@@ -121,13 +153,13 @@ export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
         if (!res.ok) {
           throw new Error(`HTTP ${res.status} ${res.statusText}`);
         }
-        const xml = await res.text();
-        // Overpass reports rate limits and timeouts as a 200 with an error document.
-        if (xml.includes('<remark>') && !xml.includes('<node')) {
-          throw new Error(`remark: ${xml.slice(0, 300)}`);
+        const body = await res.text();
+        // Overpass reports rate limits and timeouts as a 200 with an error
+        // document: <remark> in XML, "remark" in JSON, and no data either way.
+        if (!hasPayload(body)) {
+          throw new Error(`empty answer: ${body.slice(0, 300)}`);
         }
-        await writeFile(outPath, xml, 'utf8');
-        return { bytes: Buffer.byteLength(xml), path: outPath, endpoint };
+        return { body, endpoint };
       } catch (err) {
         // Node's fetch reports every network problem as a bare "fetch failed".
         // What distinguishes "the service is down" from "nothing leaves this
@@ -146,4 +178,15 @@ export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
     ? `proxy: ${proxyUrl}`
     : 'no proxy configured (HTTPS_PROXY and HTTP_PROXY are empty)';
   throw new Error(`all Overpass endpoints failed, ${proxyNote}\n  ${errors.join('\n  ')}`);
+}
+
+/** Road and building data for one bounding box, written out as OSM XML. */
+export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
+  const { body, endpoint } = await overpassFetch(overpassQuery(bbox), {
+    rounds,
+    userAgent: 'noise-map/0.1 (OSM road noise mapping)',
+    hasPayload: (xml) => xml.includes('<node'),
+  });
+  await writeFile(outPath, body, 'utf8');
+  return { bytes: Buffer.byteLength(body), path: outPath, endpoint };
 }

@@ -14,6 +14,8 @@ import {
   type Stage,
 } from './config.js';
 import { cacheKey, quantize, writeCache } from './cache.js';
+import { lineSplitter } from '../../shared/lines.mjs';
+import { isStage } from '../../shared/stages.mjs';
 
 export interface JobState {
   id: string;
@@ -42,13 +44,17 @@ export interface JobState {
  * it owns most of the wall clock — a bar that races to 90% and then stalls for a
  * minute is worse than no bar at all.
  */
+// Propagation is named apart because it is also the fallback below: a cell
+// report that arrives outside a known stage belongs to the long pass.
+const PROPAGATION_SPAN: [number, number] = [0.28, 0.92];
+
 const STAGE_SPAN: Partial<Record<Stage, [number, number]>> = {
   queued: [0, 0],
   overpass: [0, 0.1],
   import: [0.1, 0.15],
   grid: [0.15, 0.18],
   preview: [0.18, 0.28],
-  propagation: [0.28, 0.92],
+  propagation: PROPAGATION_SPAN,
   isosurface: [0.92, 0.96],
   dissolve: [0.96, 0.98],
   export: [0.98, 1],
@@ -67,7 +73,6 @@ interface Job {
   error?: string;
   bytes?: number;
   listeners: Set<Listener>;
-  settled: Promise<void>;
   /**
    * How many callers are still waiting for this result. Requests to a location
    * already being computed join the run instead of starting a second one, so a
@@ -206,7 +211,7 @@ function runPipeline(job: Job): Promise<void> {
     // What the pipeline says about its own failure, when it knows more than the
     // exit code does — a job directory still held by an orphaned run, say.
     let pipelineError: string | null = null;
-    let stderrTail: string[] = [];
+    const stderrTail: string[] = [];
 
     const handleLine = (line: string) => {
       const marker = line.match(/^@@(\w+) (.*)$/);
@@ -218,13 +223,17 @@ function runPipeline(job: Job): Promise<void> {
       const [, kind, payload] = marker as unknown as [string, string, string];
 
       if (kind === 'STAGE') {
-        setStage(job, payload.trim() as Stage);
+        const stage = payload.trim();
+        // The name comes out of the pipeline as text. Checking it against the
+        // shared list beats casting: an unknown stage would otherwise reach
+        // the client as a state with no label at all.
+        if (isStage(stage)) setStage(job, stage);
       } else if (kind === 'PROGRESS') {
         const [doneCells, totalCells] = payload.trim().split(/\s+/).map(Number);
         // Both propagation passes report cells, so the span is the one of the
         // stage that is running — otherwise the preview would drive the bar
         // through the whole propagation band and then start it over.
-        const span = STAGE_SPAN[job.stage] ?? STAGE_SPAN.propagation!;
+        const span = STAGE_SPAN[job.stage] ?? PROPAGATION_SPAN;
         if (totalCells && doneCells !== undefined) {
           job.progress = span[0] + (span[1] - span[0]) * (doneCells / totalCells);
           publish(job);
@@ -246,19 +255,17 @@ function runPipeline(job: Job): Promise<void> {
       }
     };
 
-    let buffer = '';
-    const consume = (chunk: Buffer) => {
-      buffer += chunk.toString();
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
-      lines.forEach(handleLine);
-    };
-    child.stdout.on('data', consume);
-    child.stderr.on('data', consume);
+    // One splitter per stream. A shared buffer would append the head of a
+    // stderr line to an unfinished stdout one and lose the marker in both.
+    const outLines = lineSplitter(handleLine);
+    const errLines = lineSplitter(handleLine);
+    child.stdout.on('data', (chunk: Buffer) => outLines.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => errLines.push(chunk));
 
     child.on('close', async (code) => {
       job.child = null;
-      if (buffer) handleLine(buffer);
+      outLines.flush();
+      errLines.flush();
       // A killed pipeline exits non-zero with a truncated log. That is not a
       // failure to report — the stage was already set when the kill was issued.
       if (job.cancelled) return resolve();
@@ -308,7 +315,8 @@ function runPipeline(job: Job): Promise<void> {
 export function startJob(lat: number, lon: number, wantsPreview = true): Job {
   const id = cacheKey(lat, lon);
   const existing = jobs.get(id);
-  const spent = existing?.stage === 'cancelled' || (existing?.stage === 'error' && existing.retryable);
+  const spent =
+    existing?.stage === 'cancelled' || (existing?.stage === 'error' && existing.retryable);
   if (existing && !spent) {
     existing.waiters += 1;
     return existing;
@@ -332,7 +340,6 @@ export function startJob(lat: number, lon: number, wantsPreview = true): Job {
     progress: 0,
     startedAt: Date.now(),
     listeners: new Set(),
-    settled: Promise.resolve(),
     waiters: 1,
     cancelled: false,
     child: null,
@@ -343,7 +350,9 @@ export function startJob(lat: number, lon: number, wantsPreview = true): Job {
   };
   jobs.set(id, job);
 
-  job.settled = (async () => {
+  // Not awaited anywhere: the job publishes its own progress and final state
+  // through the listeners, and nothing outside needs a handle on the run.
+  void (async () => {
     await acquireSlot();
     try {
       // Cancelled while queued: nothing was spawned, so there is nothing to

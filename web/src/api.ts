@@ -1,16 +1,8 @@
-export type Stage =
-  | 'queued'
-  | 'overpass'
-  | 'import'
-  | 'grid'
-  | 'preview'
-  | 'propagation'
-  | 'isosurface'
-  | 'dissolve'
-  | 'export'
-  | 'done'
-  | 'error'
-  | 'cancelled';
+import type { Stage } from '../../shared/stages.mjs';
+// One declaration for both sides: the server publishes these names, and this
+// file is where the browser reads them. Re-exported because the components
+// import Stage from './api'.
+export type { Stage };
 
 export interface JobState {
   id: string;
@@ -119,9 +111,8 @@ export async function requestNoise(lat: number, lon: number): Promise<CreateResp
  * referer restriction, so it must never reach the browser.
  */
 export async function geocode(query: string): Promise<Place[]> {
-  const { places } = await asJson<{ places: Place[] }>(
-    await fetch(`/api/geocode?q=${encodeURIComponent(query)}`),
-  );
+  const params = new URLSearchParams({ q: query });
+  const { places } = await asJson<{ places: Place[] }>(await fetch(`/api/geocode?${params}`));
   return places;
 }
 
@@ -145,11 +136,15 @@ export async function fetchAreas(bounds: {
   maxLon: number;
   maxLat: number;
 }): Promise<ComputedArea[]> {
-  const bbox = [bounds.minLon, bounds.minLat, bounds.maxLon, bounds.maxLat]
-    .map((n) => n.toFixed(5))
-    .join(',');
+  // Five decimals is about a metre. The box is asked for with room to spare,
+  // so its edges never needed to be more exact than that.
+  const params = new URLSearchParams({
+    bbox: [bounds.minLon, bounds.minLat, bounds.maxLon, bounds.maxLat]
+      .map((n) => n.toFixed(5))
+      .join(','),
+  });
   const { areas } = await asJson<{ areas: ComputedArea[] }>(
-    await fetch(`/api/noise/areas?bbox=${bbox}`),
+    await fetch(`/api/noise/areas?${params}`),
   );
   return areas;
 }

@@ -1,0 +1,42 @@
+MIT License
+
+Copyright (c) 2026 Sergei Ryzhov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Эта лицензия покрывает код этого репозитория и только его. Всё, с чем он
+работает, живёт по своим условиям, и они не наследуются от MIT:
+
+- **NoiseModelling** — GPLv3. Не входит в этот репозиторий и не линкуется в
+  него: дистрибутив ставится отдельно в `.tools/` и запускается собственным
+  процессом (`bin/ScriptRunner`), обмен идёт через файлы и через вывод в
+  консоль. Groovy-скрипт `pipeline/noise_pipeline.groovy` написан для его API
+  и распространяется здесь на условиях выше, но сам движок — по GPLv3.
+- **Данные OpenStreetMap** — ODbL. Всё, что рассчитано по выгрузке OSM,
+  наследует её условия, включая указание источника: «Данные © OpenStreetMap».
+  Интерфейс делает это на каждой странице.
+- **Тайлы рельефа Terrarium** (AWS Open Data) — условия набора данных Mapzen /
+  Amazon Open Data.
+- **JavaScript API и HTTP-геокодер Яндекс.Карт** — условия использования
+  Яндекса, некоммерческие для бесплатного тарифа. Ключи в репозиторий не
+  входят и в лицензию не попадают.
+
+Подробный разбор — в README, раздел про лицензии зависимостей.

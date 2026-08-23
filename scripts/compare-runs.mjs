@@ -7,16 +7,10 @@
  * Usage: node scripts/compare-runs.mjs <a.geojson> <b.geojson> [period]
  */
 import { readFile } from 'node:fs/promises';
+import { bandMid } from './lib.mjs';
 
 const [fileA, fileB, period = 'DEN'] = process.argv.slice(2);
 if (!fileA || !fileB) throw new Error('нужны два файла для сравнения');
-
-function bandMid(label) {
-  if (label.startsWith('-')) return 32.5;
-  if (label.endsWith('+')) return 82.5;
-  const [a, b] = label.split('-').map(Number);
-  return (a + b) / 2;
-}
 
 /**
  * Planar area via the shoelace formula on a local equirectangular projection.
@@ -62,9 +56,7 @@ async function areasByBand(file) {
 const a = await areasByBand(fileA);
 const b = await areasByBand(fileB);
 
-const labels = [...new Set([...a.keys(), ...b.keys()])].sort(
-  (x, y) => bandMid(x) - bandMid(y),
-);
+const labels = [...new Set([...a.keys(), ...b.keys()])].sort((x, y) => bandMid(x) - bandMid(y));
 
 console.log(`период ${period}\n`);
 console.log('диапазон    A, га      B, га      разница');
@@ -90,11 +82,11 @@ for (const label of labels) {
   );
 }
 
-console.log(`\nплощадь всего:        A ${(totalA / 10000).toFixed(1)} га, B ${(totalB / 10000).toFixed(1)} га`);
+console.log(
+  `\nплощадь всего:        A ${(totalA / 10000).toFixed(1)} га, B ${(totalB / 10000).toFixed(1)} га`,
+);
 console.log(
   `средний уровень:      A ${(weightedA / totalA).toFixed(2)} дБ(A), B ${(weightedB / totalB).toFixed(2)} дБ(A)`,
 );
 // Each hectare that changed band is counted once in A and once in B.
-console.log(
-  `сменило диапазон:     ${((shifted / 2 / totalA) * 100).toFixed(1)}% площади`,
-);
+console.log(`сменило диапазон:     ${((shifted / 2 / totalA) * 100).toFixed(1)}% площади`);

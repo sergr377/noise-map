@@ -2,6 +2,7 @@
   "name": "noise-map",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Road traffic noise map: OpenStreetMap -> CNOSSOS-EU (NoiseModelling) -> isophones on Yandex Maps",
   "scripts": {
@@ -10,7 +11,11 @@
     "server": "npm run build:server && node server/dist/index.js",
     "web": "vite",
     "build:web": "vite build",
-    "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json"
+    "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json",
+    "test": "node --test \"test/*.test.mjs\"",
+    "lint": "biome check",
+    "lint:fix": "biome check --write",
+    "format": "biome format --write"
   },
   "engines": {
     "node": ">=20"
@@ -23,6 +28,7 @@
     "undici": "^7.29.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.10",
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",

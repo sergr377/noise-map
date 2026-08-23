@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import type { Stage } from '../../shared/stages.mjs';
 
 /** Repository root: this file lives two levels down, both in src/ and in dist/. */
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -8,8 +9,13 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 // .env is optional — the server runs fine without it, only the frontend needs a key.
 try {
   process.loadEnvFile(path.join(ROOT, '.env'));
-} catch {
-  /* no .env present */
+} catch (err) {
+  // Only a missing file is ordinary. Anything else — no permission to read it,
+  // a directory in its place, a Node too old to have loadEnvFile at all — also
+  // leaves every variable unset, and that failure then looks like a broken
+  // location or a dead Overpass rather than a server started without its
+  // configuration. Once was enough.
+  if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
 }
 
 // Node's fetch ignores HTTP(S)_PROXY, unlike curl or PowerShell. On a machine
@@ -50,6 +56,21 @@ export const WEB_DIST = path.join(ROOT, 'dist-web');
  * happen. With this set the API still serves anything already in the cache.
  */
 export const CACHE_ONLY = process.env.CACHE_ONLY === '1';
+/**
+ * Кто может обращаться к API из браузера. Пусто — любой: для публичного
+ * read-mostly сервиса без cookie и без аутентификации это защитимый выбор,
+ * и он остаётся значением по умолчанию.
+ *
+ * Но POST /api/noise не бесплатен: холодный клик занимает все ядра на
+ * минуты и тратит бюджет расчётов посетителя. Пока стоит звёздочка, любой
+ * сторонний сайт может встроить этот вызов и потратить чужой бюджет — то
+ * самое, от чего ключ Яндекс.Карт защищён ограничением по Referer. Список
+ * источников через запятую закрывает эту дверь в проде.
+ */
+export const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 export const RUN_JOB_SCRIPT = path.join(ROOT, 'scripts', 'run-job.mjs');
 
 /**
@@ -187,19 +208,10 @@ export const JOB_PARAMS = {
  */
 export const CACHE_GRID_METERS = 100;
 
-export type Stage =
-  | 'queued'
-  | 'overpass'
-  | 'import'
-  | 'grid'
-  | 'preview'
-  | 'propagation'
-  | 'isosurface'
-  | 'dissolve'
-  | 'export'
-  | 'done'
-  | 'error'
-  | 'cancelled';
+// Shared with the browser and with run-job.mjs, which emits these names as
+// markers. Re-exported so the modules importing Stage from './config.js' —
+// queue.ts, index.ts — keep their single import.
+export type { Stage };
 
 /** Stages after which nothing more will be published — the stream can close. */
 export const TERMINAL_STAGES: ReadonlySet<Stage> = new Set<Stage>(['done', 'error', 'cancelled']);

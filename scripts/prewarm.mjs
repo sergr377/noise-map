@@ -38,7 +38,9 @@ function parseTargets(argv) {
     }
     const [lat, lon] = arg.split(',').map(Number);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-      throw new Error(`не разобрал "${arg}" — ожидается пресет (${Object.keys(PRESETS).join(', ')}) или "lat,lon"`);
+      throw new Error(
+        `не разобрал "${arg}" — ожидается пресет (${Object.keys(PRESETS).join(', ')}) или "lat,lon"`,
+      );
     }
     targets.push({ name: `${lat},${lon}`, lat, lon });
   }

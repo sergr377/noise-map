@@ -1,0 +1,48 @@
+# Everything here runs without Java, without the NoiseModelling distribution
+# and without network access to Overpass — which is the whole reason the real
+# end-to-end check (scripts/smoke-api.mjs) is not part of it. That one starts an
+# actual calculation: minutes of CPU across every core, a 148 MB engine that is
+# not in git, and live OSM data. Run it by hand against a running server.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The server reads .env through process.loadEnvFile, which is Node 22.
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Типы
+        run: npm run typecheck
+
+      - name: Линтер и форматирование
+        run: npm run lint
+
+      - name: Юнит-тесты
+        run: npm test
+
+      - name: Сборка сервера
+        run: npm run build:server
+
+      # Two clicks a few metres apart must land in the same cache cell, and the
+      # check needs the compiled server. ~88 000 points, a couple of seconds.
+      - name: Идемпотентность сетки кэша
+        run: node scripts/check-quantize.mjs
+
+      # No VITE_YANDEX_API_KEY here on purpose: the key is missing at build time
+      # and the bundle still has to come out. It fails in the browser instead,
+      # with a message that says which key to set.
+      - name: Сборка фронтенда
+        run: npm run build:web

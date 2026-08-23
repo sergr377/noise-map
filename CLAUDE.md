@@ -11,6 +11,8 @@ npm run server      # builds TS, serves the API on :8787 (and dist-web if built)
 npm run web         # Vite on :5174, proxies /api to :8787
 npm run typecheck   # server and web, both strict
 npm run build:web
+npm test            # unit tests for the pure helpers; no Java, no network
+npm run lint        # Biome: lint + format check (npm run lint:fix to apply)
 
 node scripts/run-job.mjs --lat 55.7649 --lon 37.6055   # compute directly, no API
 node scripts/sanity-check.mjs <geojson> DEN            # did building screening survive

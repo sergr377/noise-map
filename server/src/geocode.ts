@@ -52,9 +52,10 @@ export async function geocode(query: string, limit = 5): Promise<Place[]> {
 
   const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
   if (!res.ok) {
-    // 403 here almost always means the key lost its quota or was revoked;
-    // surfacing the upstream status makes that diagnosable from the client.
-    throw new GeocoderError(`геокодер ответил ${res.status}`, res.status === 403 ? 502 : 502);
+    // 403 here almost always means the key lost its quota or was revoked. That
+    // is our own configuration failing, exactly like the missing key above, so
+    // it answers 503 and not the 502 kept for an upstream that misbehaved.
+    throw new GeocoderError(`геокодер ответил ${res.status}`, res.status === 403 ? 503 : 502);
   }
 
   const data = (await res.json()) as YandexGeocoderResponse;

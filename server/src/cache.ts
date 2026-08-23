@@ -84,7 +84,12 @@ async function readMeta(key: string): Promise<CachedArea | null> {
   try {
     const raw = JSON.parse(await readFile(metaPath(key), 'utf8')) as Partial<CachedArea>;
     if (Number.isFinite(raw.lat) && Number.isFinite(raw.lon) && Number.isFinite(raw.radius)) {
-      return { id: key, lat: raw.lat as number, lon: raw.lon as number, radius: raw.radius as number };
+      return {
+        id: key,
+        lat: raw.lat as number,
+        lon: raw.lon as number,
+        radius: raw.radius as number,
+      };
     }
   } catch {
     /* no sidecar, or an unreadable one */
@@ -117,7 +122,9 @@ async function recoverMeta(key: string): Promise<CachedArea | null> {
     }
   };
   try {
-    const gj = JSON.parse(data.toString('utf8')) as { features?: Array<{ geometry?: { coordinates?: unknown } }> };
+    const gj = JSON.parse(data.toString('utf8')) as {
+      features?: Array<{ geometry?: { coordinates?: unknown } }>;
+    };
     for (const feature of gj.features ?? []) {
       if (feature.geometry?.coordinates) walk(feature.geometry.coordinates);
     }

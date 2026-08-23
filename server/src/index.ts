@@ -5,6 +5,7 @@ import path from 'node:path';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import {
+  ALLOWED_ORIGINS,
   CACHE_ONLY,
   JOB_PARAMS,
   KILL_GRACE_MS,
@@ -37,11 +38,29 @@ const gzipAsync = promisify(gzip);
  */
 const AREAS_PER_REQUEST = 500;
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type',
-  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-};
+/**
+ * CORS-заголовки на ответ. Ставятся один раз, в начале обработки запроса:
+ * writeHead ниже добавляет свои к уже выставленным, а не заменяет их, так
+ * что каждому маршруту не нужно помнить про заголовки самому.
+ *
+ * Пустой ALLOWED_ORIGINS означает звёздочку — публичный API, как и было.
+ * Со списком отвечаем эхом того источника, который в нём есть, и молчим для
+ * остальных: браузер сам не пустит ответ без заголовка. Vary: Origin —
+ * чтобы кэш не отдал ответ, выписанный на другой источник.
+ */
+function applyCors(req: http.IncomingMessage, res: http.ServerResponse) {
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  if (ALLOWED_ORIGINS.length === 0) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    return;
+  }
+  res.setHeader('Vary', 'Origin');
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+}
 
 function sendJson(
   res: http.ServerResponse,
@@ -52,7 +71,6 @@ function sendJson(
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    ...CORS,
     ...headers,
   });
   res.end(payload);
@@ -68,9 +86,31 @@ function sendTooMany(res: http.ServerResponse, verdict: Verdict, message: string
   );
 }
 
+/**
+ * Ceiling on a request body. The only body this API reads is
+ * {lat, lon, preview} — tens of bytes — so anything approaching this is not a
+ * client of ours. The rate limiter counts requests, not their size, and a
+ * public POST endpoint has no business collecting an unbounded string in
+ * memory just to find out it was never valid JSON.
+ */
+const MAX_BODY_BYTES = 8 * 1024;
+
+class BodyTooLargeError extends Error {}
+
 async function readBody(req: http.IncomingMessage): Promise<unknown> {
+  // Content-Length is a claim, not a guarantee, so it is a shortcut rather
+  // than the check: an honest oversized body is refused before a byte of it
+  // is read, and a lying one runs into the counter below.
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new BodyTooLargeError();
+
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_BODY_BYTES) throw new BodyTooLargeError();
+    chunks.push(chunk as Buffer);
+  }
   if (chunks.length === 0) return {};
   try {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -166,14 +206,30 @@ async function handleAreas(res: http.ServerResponse, params: URLSearchParams) {
   );
   // Not cacheable: the set grows every time a calculation finishes, and a stale
   // copy would tell someone a place is ready when it is not.
-  return sendJson(res, 200, { areas, ...(truncated ? { truncated } : {}) }, { 'Cache-Control': 'no-store' });
+  return sendJson(
+    res,
+    200,
+    { areas, ...(truncated ? { truncated } : {}) },
+    { 'Cache-Control': 'no-store' },
+  );
 }
 
 /** POST /api/noise — resolve a click to either a cached result or a running job. */
 async function handleCreate(req: http.IncomingMessage, res: http.ServerResponse, ip: string) {
-  const body = (await readBody(req)) as
-    | { lat?: unknown; lon?: unknown; preview?: unknown }
-    | null;
+  let body: { lat?: unknown; lon?: unknown; preview?: unknown } | null;
+  try {
+    body = (await readBody(req)) as { lat?: unknown; lon?: unknown; preview?: unknown } | null;
+  } catch (err) {
+    if (!(err instanceof BodyTooLargeError)) throw err;
+    // Connection: close — whatever the client is still sending will never be
+    // read, and without this it would go on filling the socket after the answer.
+    return sendJson(
+      res,
+      413,
+      { error: `тело запроса больше ${MAX_BODY_BYTES} байт` },
+      { Connection: 'close' },
+    );
+  }
   const point = readPoint(body?.lat, body?.lon);
 
   if (!point) {
@@ -285,7 +341,6 @@ function handleEvents(res: http.ServerResponse, id: string, ip: string) {
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
-    ...CORS,
   });
 
   // subscribe() invokes the listener synchronously with the current state. For a
@@ -345,7 +400,6 @@ async function handleResult(req: http.IncomingMessage, res: http.ServerResponse,
   const headers: Record<string, string> = {
     'Content-Type': 'application/geo+json; charset=utf-8',
     'Cache-Control': 'public, max-age=86400',
-    ...CORS,
   };
 
   // These files are mostly coordinate digits and compress by roughly 5x.
@@ -401,9 +455,8 @@ async function sendScratchMap(req: http.IncomingMessage, res: http.ServerRespons
   const headers: Record<string, string> = {
     'Content-Type': 'application/geo+json; charset=utf-8',
     'Cache-Control': 'no-store',
-    ...CORS,
   };
-  if (/gzip/.test(req.headers['accept-encoding'] ?? '')) {
+  if (/\bgzip\b/.test(req.headers['accept-encoding'] ?? '')) {
     res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip' });
     return res.end(await gzipAsync(data));
   }
@@ -451,7 +504,7 @@ const CONTENT_TYPES: Record<string, string> = {
  * Serves the built frontend when it exists. Unknown paths fall back to
  * index.html so that a deep link like /?lat=..&lon=.. survives a page reload.
  */
-async function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathname: string) {
+async function serveStatic(res: http.ServerResponse, pathname: string) {
   // decodeURIComponent matters: %2e%2e%2f survives URL normalisation and would
   // otherwise reach the filesystem as ../ after any later decoding.
   let relative: string;
@@ -486,12 +539,98 @@ async function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, 
   createReadStream(file).pipe(res);
 }
 
+/** One capture group: the job id, as the cache names it. */
+const JOB_ID = '([a-f0-9]{16})';
+
+interface RouteContext {
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+  url: URL;
+  ip: string;
+  /** Capture groups of the path pattern, in order. */
+  params: string[];
+}
+
+interface Route {
+  method: 'GET' | 'POST' | 'DELETE';
+  path: RegExp;
+  handle: (ctx: RouteContext) => unknown;
+}
+
+/**
+ * Every route in one place, which is the point: the alternative — a column of
+ * `if (pathname === ... && method === ...)` — reads fine at ten routes and
+ * hides the eleventh somewhere in the middle of a function.
+ *
+ * Order does not matter here, and that is deliberate: the patterns are
+ * anchored and disjoint, so no route can shadow another. `/api/noise/areas`
+ * cannot be read as a job id because ids are sixteen hex characters.
+ */
+const ROUTES: Route[] = [
+  // What the interface needs to know before anything has been calculated —
+  // today just the radius, so the map can show what a click would cover. A copy
+  // of that number in the frontend would drift from the one the result is
+  // actually computed with.
+  {
+    method: 'GET',
+    path: /^\/api\/config$/,
+    handle: ({ res }) => sendJson(res, 200, { radius: JOB_PARAMS.radius }),
+  },
+  {
+    method: 'POST',
+    path: /^\/api\/noise$/,
+    handle: ({ req, res, ip }) => handleCreate(req, res, ip),
+  },
+  {
+    method: 'GET',
+    path: /^\/api\/noise\/areas$/,
+    handle: ({ res, url }) => handleAreas(res, url.searchParams),
+  },
+  {
+    method: 'GET',
+    path: /^\/api\/noise$/,
+    handle: ({ res, url }) => handleProbe(res, url.searchParams),
+  },
+  {
+    method: 'GET',
+    path: /^\/api\/geocode$/,
+    handle: ({ res, url, ip }) => handleGeocode(res, url.searchParams.get('q') ?? '', ip),
+  },
+  {
+    method: 'DELETE',
+    path: new RegExp(`^/api/noise/${JOB_ID}$`),
+    handle: ({ res, params: [id = ''] }) => handleCancel(res, id),
+  },
+  {
+    method: 'GET',
+    path: new RegExp(`^/api/noise/${JOB_ID}/events$`),
+    handle: ({ res, ip, params: [id = ''] }) => handleEvents(res, id, ip),
+  },
+  {
+    method: 'GET',
+    path: new RegExp(`^/api/noise/${JOB_ID}/result$`),
+    handle: ({ req, res, params: [id = ''] }) => handleResult(req, res, id),
+  },
+  {
+    method: 'GET',
+    path: new RegExp(`^/api/noise/${JOB_ID}/preview$`),
+    handle: ({ req, res, params: [id = ''] }) => handlePreview(req, res, id),
+  },
+  {
+    method: 'GET',
+    path: new RegExp(`^/api/noise/${JOB_ID}/partial/(\\d{1,4})$`),
+    handle: ({ req, res, params: [id = '', frame = ''] }) =>
+      handlePartial(req, res, id, Number(frame)),
+  },
+];
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    applyCors(req, res);
 
     if (req.method === 'OPTIONS') {
-      res.writeHead(204, CORS);
+      res.writeHead(204);
       return res.end();
     }
     // Liveness probes come from the platform, not from users, and throttling
@@ -519,49 +658,15 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // What the interface needs to know before anything has been calculated —
-    // today just the radius, so the map can show what a click would cover.
-    // A copy of that number in the frontend would drift from the one the result
-    // is actually computed with.
-    if (url.pathname === '/api/config' && req.method === 'GET') {
-      return sendJson(res, 200, { radius: JOB_PARAMS.radius });
-    }
-    if (url.pathname === '/api/noise' && req.method === 'POST') {
-      return await handleCreate(req, res, ip);
-    }
-    if (url.pathname === '/api/noise/areas' && req.method === 'GET') {
-      return await handleAreas(res, url.searchParams);
-    }
-    if (url.pathname === '/api/noise' && req.method === 'GET') {
-      return await handleProbe(res, url.searchParams);
-    }
-    if (url.pathname === '/api/geocode' && req.method === 'GET') {
-      return await handleGeocode(res, url.searchParams.get('q') ?? '', ip);
-    }
-
-    const cancel = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})$/);
-    if (cancel && req.method === 'DELETE') {
-      return handleCancel(res, cancel[1] as string);
-    }
-
-    const preview = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/preview$/);
-    if (preview && req.method === 'GET') {
-      return await handlePreview(req, res, preview[1] as string);
-    }
-
-    const frame = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/partial\/(\d{1,4})$/);
-    if (frame && req.method === 'GET') {
-      return await handlePartial(req, res, frame[1] as string, Number(frame[2]));
-    }
-
-    const match = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/(events|result)$/);
-    if (match && req.method === 'GET') {
-      const [, id, kind] = match as unknown as [string, string, string];
-      return kind === 'events' ? handleEvents(res, id, ip) : await handleResult(req, res, id);
+    for (const route of ROUTES) {
+      if (route.method !== req.method) continue;
+      const match = route.path.exec(url.pathname);
+      if (!match) continue;
+      return await route.handle({ req, res, url, ip, params: match.slice(1) });
     }
 
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
-      return await serveStatic(req, res, url.pathname);
+      return await serveStatic(res, url.pathname);
     }
 
     return sendJson(res, 404, { error: 'not found' });
