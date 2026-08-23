@@ -539,6 +539,91 @@ async function serveStatic(res: http.ServerResponse, pathname: string) {
   createReadStream(file).pipe(res);
 }
 
+/** One capture group: the job id, as the cache names it. */
+const JOB_ID = '([a-f0-9]{16})';
+
+interface RouteContext {
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+  url: URL;
+  ip: string;
+  /** Capture groups of the path pattern, in order. */
+  params: string[];
+}
+
+interface Route {
+  method: 'GET' | 'POST' | 'DELETE';
+  path: RegExp;
+  handle: (ctx: RouteContext) => unknown;
+}
+
+/**
+ * Every route in one place, which is the point: the alternative — a column of
+ * `if (pathname === ... && method === ...)` — reads fine at ten routes and
+ * hides the eleventh somewhere in the middle of a function.
+ *
+ * Order does not matter here, and that is deliberate: the patterns are
+ * anchored and disjoint, so no route can shadow another. `/api/noise/areas`
+ * cannot be read as a job id because ids are sixteen hex characters.
+ */
+const ROUTES: Route[] = [
+  // What the interface needs to know before anything has been calculated —
+  // today just the radius, so the map can show what a click would cover. A copy
+  // of that number in the frontend would drift from the one the result is
+  // actually computed with.
+  {
+    method: 'GET',
+    path: /^\/api\/config$/,
+    handle: ({ res }) => sendJson(res, 200, { radius: JOB_PARAMS.radius }),
+  },
+  {
+    method: 'POST',
+    path: /^\/api\/noise$/,
+    handle: ({ req, res, ip }) => handleCreate(req, res, ip),
+  },
+  {
+    method: 'GET',
+    path: /^\/api\/noise\/areas$/,
+    handle: ({ res, url }) => handleAreas(res, url.searchParams),
+  },
+  {
+    method: 'GET',
+    path: /^\/api\/noise$/,
+    handle: ({ res, url }) => handleProbe(res, url.searchParams),
+  },
+  {
+    method: 'GET',
+    path: /^\/api\/geocode$/,
+    handle: ({ res, url, ip }) => handleGeocode(res, url.searchParams.get('q') ?? '', ip),
+  },
+  {
+    method: 'DELETE',
+    path: new RegExp(`^/api/noise/${JOB_ID}$`),
+    handle: ({ res, params: [id = ''] }) => handleCancel(res, id),
+  },
+  {
+    method: 'GET',
+    path: new RegExp(`^/api/noise/${JOB_ID}/events$`),
+    handle: ({ res, ip, params: [id = ''] }) => handleEvents(res, id, ip),
+  },
+  {
+    method: 'GET',
+    path: new RegExp(`^/api/noise/${JOB_ID}/result$`),
+    handle: ({ req, res, params: [id = ''] }) => handleResult(req, res, id),
+  },
+  {
+    method: 'GET',
+    path: new RegExp(`^/api/noise/${JOB_ID}/preview$`),
+    handle: ({ req, res, params: [id = ''] }) => handlePreview(req, res, id),
+  },
+  {
+    method: 'GET',
+    path: new RegExp(`^/api/noise/${JOB_ID}/partial/(\\d{1,4})$`),
+    handle: ({ req, res, params: [id = '', frame = ''] }) =>
+      handlePartial(req, res, id, Number(frame)),
+  },
+];
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -573,45 +658,11 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // What the interface needs to know before anything has been calculated —
-    // today just the radius, so the map can show what a click would cover.
-    // A copy of that number in the frontend would drift from the one the result
-    // is actually computed with.
-    if (url.pathname === '/api/config' && req.method === 'GET') {
-      return sendJson(res, 200, { radius: JOB_PARAMS.radius });
-    }
-    if (url.pathname === '/api/noise' && req.method === 'POST') {
-      return await handleCreate(req, res, ip);
-    }
-    if (url.pathname === '/api/noise/areas' && req.method === 'GET') {
-      return await handleAreas(res, url.searchParams);
-    }
-    if (url.pathname === '/api/noise' && req.method === 'GET') {
-      return await handleProbe(res, url.searchParams);
-    }
-    if (url.pathname === '/api/geocode' && req.method === 'GET') {
-      return await handleGeocode(res, url.searchParams.get('q') ?? '', ip);
-    }
-
-    const cancel = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})$/);
-    if (cancel && req.method === 'DELETE') {
-      return handleCancel(res, cancel[1] as string);
-    }
-
-    const preview = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/preview$/);
-    if (preview && req.method === 'GET') {
-      return await handlePreview(req, res, preview[1] as string);
-    }
-
-    const frame = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/partial\/(\d{1,4})$/);
-    if (frame && req.method === 'GET') {
-      return await handlePartial(req, res, frame[1] as string, Number(frame[2]));
-    }
-
-    const match = url.pathname.match(/^\/api\/noise\/([a-f0-9]{16})\/(events|result)$/);
-    if (match && req.method === 'GET') {
-      const [, id, kind] = match as unknown as [string, string, string];
-      return kind === 'events' ? handleEvents(res, id, ip) : await handleResult(req, res, id);
+    for (const route of ROUTES) {
+      if (route.method !== req.method) continue;
+      const match = route.path.exec(url.pathname);
+      if (!match) continue;
+      return await route.handle({ req, res, url, ip, params: match.slice(1) });
     }
 
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
