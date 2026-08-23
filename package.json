@@ -2,6 +2,7 @@
   "name": "noise-map",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Road traffic noise map: OpenStreetMap -> CNOSSOS-EU (NoiseModelling) -> isophones on Yandex Maps",
   "scripts": {
