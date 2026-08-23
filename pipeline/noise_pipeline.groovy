@@ -42,14 +42,70 @@ outputs = [
 ]
 
 /**
+ * Барьер между параметрами задачи и текстом запроса.
+ *
+ * Запросы здесь собираются интерполяцией строк, а не через `?`, и это не
+ * недосмотр: выражение диска и список колонок — фрагменты SQL, которые
+ * встраиваются сразу в несколько запросов, а имя таблицы параметром вообще
+ * не бывает. Пути для инъекции сегодня нет: числа приходят из params.json,
+ * который пишет run-job.mjs по координатам, проверенным ещё на HTTP-слое
+ * (readPoint: Number.isFinite и диапазон), а имена таблиц — литералы отсюда
+ * же. Но у самого приёма нет структурной защиты: он в одно неосторожное
+ * добавление свободного текстового поля от того, чтобы стать настоящей
+ * уязвимостью.
+ *
+ * Поэтому всё, что попадает в текст запроса, проходит через эти три функции.
+ * Ошибка здесь громкая и до выполнения запроса, а не тихая и после.
+ */
+Number sqlNumber(Object value, String name) {
+    if (!(value instanceof Number)) {
+        throw new IllegalArgumentException(
+                "${name}: ожидалось число, пришло ${value?.getClass()?.name}: ${value}" as String)
+    }
+    double probe = ((Number) value).doubleValue()
+    if (Double.isNaN(probe) || Double.isInfinite(probe)) {
+        throw new IllegalArgumentException("${name}: не конечное число: ${value}" as String)
+    }
+    // Возвращается исходное число, а не приведённое: так текст запроса
+    // остаётся ровно тем же, каким был до появления проверки.
+    return (Number) value
+}
+
+/**
+ * Имя таблицы или колонки. Пайплайн создаёт их сам и называет заглавными
+ * буквами — всё остальное сюда попасть не должно ни при каких параметрах.
+ */
+String sqlName(Object value, String name) {
+    String s = String.valueOf(value)
+    if (!(s ==~ /[A-Z][A-Z0-9_]*/)) {
+        throw new IllegalArgumentException("${name}: недопустимое имя в запросе: ${value}" as String)
+    }
+    return s
+}
+
+/**
+ * Строковый литерал внутри запроса. Разрешены буквы, цифры, дефис и
+ * подчёркивание: этого хватает именам подвижного состава из каталога
+ * CNOSSOS, а кавычке или точке с запятой взяться уже неоткуда.
+ */
+String sqlLiteral(Object value, String name) {
+    String s = String.valueOf(value)
+    if (!(s ==~ /[A-Za-z0-9_\-]+/)) {
+        throw new IllegalArgumentException("${name}: недопустимый литерал: ${value}" as String)
+    }
+    return s
+}
+
+/**
  * Диск зоны показа в рабочей проекции. Приёмники всегда заполняют описанный
  * квадрат — Delaunay_Grid берёт от fence только envelope, — поэтому круг
  * вырезается из готовых изофон.
  */
 String discExpression(Map p) {
     return "ST_BUFFER(ST_TRANSFORM(ST_SETSRID(" +
-            "ST_GEOMFROMTEXT('POINT(${p.centreLon} ${p.centreLat})'), 4326), ${p.srid}), " +
-            "${p.radius as Double}, 'quad_segs=16')"
+            "ST_GEOMFROMTEXT('POINT(${sqlNumber(p.centreLon, 'centreLon')} " +
+            "${sqlNumber(p.centreLat, 'centreLat')})'), 4326), ${sqlNumber(p.srid, 'srid')}), " +
+            "${sqlNumber(p.radius, 'radius') as Double}, 'quad_segs=16')"
 }
 
 /**
@@ -68,31 +124,32 @@ Map dissolveClipExport(Connection c, Map p, String contourTable, String dissolve
     Sql sql = new Sql(c)
     String disc = discExpression(p)
 
-    sql.execute("DROP TABLE IF EXISTS ${dissolvedTable}" as String)
+    sql.execute("DROP TABLE IF EXISTS ${sqlName(dissolvedTable, 'dissolvedTable')}" as String)
     sql.execute("""
-        CREATE TABLE ${dissolvedTable} AS
+        CREATE TABLE ${sqlName(dissolvedTable, 'dissolvedTable')} AS
         SELECT ST_BUFFER(
                    ST_INTERSECTION(
                        ST_SIMPLIFYPRESERVETOPOLOGY(
                            ST_UNION(ST_ACCUM(ST_BUFFER(THE_GEOM, 0))),
-                           ${p.simplifyTolerance as Double}
+                           ${sqlNumber(p.simplifyTolerance, 'simplifyTolerance') as Double}
                        ),
                        ${disc}
                    ),
                    0
                ) AS THE_GEOM,
                PERIOD, ISOLVL, ISOLABEL
-        FROM ${contourTable}
+        FROM ${sqlName(contourTable, 'contourTable')}
         GROUP BY PERIOD, ISOLVL, ISOLABEL
     """ as String)
 
     // Диапазон, целиком лежащий вне круга, переживает обрезку пустой геометрией,
     // которая выгрузилась бы фичей без координат.
     int emptied = sql.executeUpdate(
-            "DELETE FROM ${dissolvedTable} WHERE THE_GEOM IS NULL OR ST_ISEMPTY(THE_GEOM)" as String)
+            "DELETE FROM ${sqlName(dissolvedTable, 'dissolvedTable')} " +
+                    "WHERE THE_GEOM IS NULL OR ST_ISEMPTY(THE_GEOM)" as String)
 
-    int before = sql.firstRow("SELECT COUNT(*) AS n FROM ${contourTable}" as String).n as Integer
-    int after = sql.firstRow("SELECT COUNT(*) AS n FROM ${dissolvedTable}" as String).n as Integer
+    int before = sql.firstRow("SELECT COUNT(*) AS n FROM ${sqlName(contourTable, 'contourTable')}" as String).n as Integer
+    int after = sql.firstRow("SELECT COUNT(*) AS n FROM ${sqlName(dissolvedTable, 'dissolvedTable')}" as String).n as Integer
 
     // Метрическая проекция — деталь расчёта, вебу нужен 4326.
     new Change_SRID().exec(c, [tableName: dissolvedTable, newSRID: 4326])
@@ -159,7 +216,7 @@ Thread startPartialWatcher(Connection main, Map p, Logger logger, AtomicBoolean 
                     sql.execute("""
                         CREATE TABLE PARTIAL_READY AS
                         SELECT IDRECEIVER FROM RECEIVERS_LEVEL
-                        GROUP BY IDRECEIVER HAVING COUNT(*) >= ${periods}
+                        GROUP BY IDRECEIVER HAVING COUNT(*) >= ${sqlNumber(periods, 'periods')}
                     """ as String)
                     // Без ключа H2 перебирает готовых приёмников заново на
                     // каждый треугольник, и кадр не достраивается никогда —
@@ -244,7 +301,7 @@ Thread startPartialWatcher(Connection main, Map p, Logger logger, AtomicBoolean 
                     Sql cleanup = new Sql(c)
                     ['PARTIAL_READY', 'PARTIAL_LEVELS', 'TRIANGLES_PARTIAL', 'CONTOURING_PARTIAL',
                      'CONTOURING_PARTIAL_DISSOLVED'].each {
-                        cleanup.execute("DROP TABLE IF EXISTS ${it}" as String)
+                        cleanup.execute("DROP TABLE IF EXISTS ${sqlName(it, 'таблица кадра')}" as String)
                     }
                     c.close()
                 }
@@ -439,11 +496,11 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
         sql.execute("""
             CREATE TABLE RAIL_TRAFFIC AS
             SELECT IDSECTION AS IDTRAFFIC, IDSECTION,
-                   '${p.trainType}' AS TRAINTYPE,
+                   '${sqlLiteral(p.trainType, 'trainType')}' AS TRAINTYPE,
                    TRACKSPD AS TRAINSPD,
-                   ${p.trainsDay as Integer} AS TDAY,
-                   ${p.trainsEvening as Integer} AS TEVENING,
-                   ${p.trainsNight as Integer} AS TNIGHT
+                   ${sqlNumber(p.trainsDay, 'trainsDay') as Integer} AS TDAY,
+                   ${sqlNumber(p.trainsEvening, 'trainsEvening') as Integer} AS TEVENING,
+                   ${sqlNumber(p.trainsNight, 'trainsNight') as Integer} AS TNIGHT
             FROM RAIL_SECTIONS
         """ as String)
         sql.execute('ALTER TABLE RAIL_TRAFFIC ALTER COLUMN IDTRAFFIC SET NOT NULL')
@@ -484,7 +541,8 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
         // receiver, while a receiver out of range of any track has no rail row.
         def bands = ['HZ63', 'HZ125', 'HZ250', 'HZ500', 'HZ1000', 'HZ2000', 'HZ4000', 'HZ8000', 'LAEQ', 'LEQ']
         def sums = bands.collect { band ->
-            "10 * LOG10(POWER(10, r.${band} / 10) + POWER(10, COALESCE(t.${band}, -99) / 10)) AS ${band}"
+            String col = sqlName(band, 'полоса')
+            "10 * LOG10(POWER(10, r.${col} / 10) + POWER(10, COALESCE(t.${col}, -99) / 10)) AS ${col}"
         }.join(',\n                   ')
 
         sql.execute('DROP TABLE IF EXISTS RECEIVERS_LEVEL')
