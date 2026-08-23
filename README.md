@@ -1009,8 +1009,19 @@ server/src/
   geocode.ts              прокси к HTTP Геокодеру, ключ не покидает сервер
   config.ts               параметры расчёта, подписи этапов, .env
 web/src/
-  App.tsx                 состояние, прогресс, легенда, переключатель периодов
+  App.tsx                 композиция: карта, панель и связи между ними
   MapCanvas.tsx           карта и слой изофон
+  useNoiseJob.ts          жизнь расчёта: запрос, прогресс, кадры, отмена
+  useAddressSearch.ts     строка адреса и результаты геокодера
+  useComputedAreas.ts     посчитанные области под текущей рамкой
+  usePanelMargin.ts       измеренный отступ панели для камеры
+  progress.ts             счётчик секунд и сглаживание прогресса
+  camera.ts               подбор зума под диск результата
+  urlState.ts             точка и период в адресной строке
+  SearchPanel.tsx         форма поиска и список найденного
+  ProgressPanel.tsx       бар, часы, кнопка отмены и пояснения
+  PeriodSwitch.tsx        переключатель периода суток
+  Legend.tsx              шкала уровней
   ymaps.ts                бутстрап JS API и reactify (top-level await)
   api.ts                  клиент HTTP-слоя, включая SSE
   palette.ts              цветовая шкала уровней
