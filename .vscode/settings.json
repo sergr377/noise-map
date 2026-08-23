@@ -1,0 +1,21 @@
+{
+  // Форматирование по Ctrl+S. Правила берутся из biome.json в корне проекта,
+  // так что редактор и `npm run format` дают одинаковый результат.
+  "editor.formatOnSave": true,
+
+  "[javascript]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[javascriptreact]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[typescript]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[typescriptreact]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[json]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[jsonc]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[css]": { "editor.defaultFormatter": "biomejs.biome" },
+
+  // README свёрстан вручную по ширине строк — автоформат его только испортит.
+  "[markdown]": { "editor.formatOnSave": false },
+
+  "editor.insertSpaces": true,
+  "editor.tabSize": 2,
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true
+}
