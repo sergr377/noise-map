@@ -11,7 +11,7 @@ npm run server      # builds TS, serves the API on :8787 (and dist-web if built)
 npm run web         # Vite on :5174, proxies /api to :8787
 npm run typecheck   # server and web, both strict
 npm run build:web
-npm test            # unit tests for the pure helpers; no Java, no network
+npm test            # unit tests: pure helpers and the Overpass retry loop
 npm run lint        # Biome: lint + format check (npm run lint:fix to apply)
 
 node scripts/run-job.mjs --lat 55.7649 --lon 37.6055   # compute directly, no API
@@ -25,6 +25,10 @@ node scripts/check-quantize.mjs                        # cache grid idempotence
 # needs the API running on :8787:
 node scripts/prewarm.mjs moscow                        # warm the demo cache
 node scripts/smoke-api.mjs                             # end-to-end check of the HTTP layer
+
+# the same end-to-end check without Java, Overpass or minutes of CPU — this is
+# what CI runs, and what to use when the question is about the HTTP layer:
+RUN_JOB_SCRIPT=scripts/fake-job.mjs CACHE_DIR=/tmp/noise-cache npm run server
 ```
 
 `inspect_db.groovy` dumps table schemas from a job database — this is how you find
@@ -94,6 +98,15 @@ and **do not commit if it matches**. A key once reached the history along with
 `dist-web/` precisely because this check printed a warning without blocking.
 `dist-web/` is now in `.gitignore`.
 
+That key is still in the history (`d1db820`, removed in `4da2ffd`), and the
+owner's decision is to leave it: the JS API key is public by nature — every
+visitor already has it out of the bundle — and is protected by its HTTP Referer
+restriction rather than by secrecy. **So the restriction has to stay in place**;
+if it ever comes off, reissue the key. The geocoder key is not in the history at
+all, checked across every branch. Rewriting the history was considered and
+rejected: it breaks other people's clones and the old objects stay reachable by
+SHA in GitHub's cache anyway, so it would not have been a guarantee.
+
 ## NoiseModelling rakes
 
 The full annotated list is in the README under "Грабли". The ones that bite most:
@@ -135,6 +148,58 @@ The full annotated list is in the README under "Грабли". The ones that bit
 - Results come out in a metric projection; the web needs `Change_SRID` to 4326.
 - `CREATE TABLE AS SELECT` leaves columns nullable in H2 and a primary key will not
   accept them — `SET NOT NULL` first.
+
+## The stub engine
+
+`RUN_JOB_SCRIPT` replaces `run-job.mjs` with any script speaking the same
+command line and the same `@@` marker protocol; `scripts/fake-job.mjs` is one
+that computes nothing. That is what lets `smoke-api.mjs` gate CI — all 25 checks
+are real, because the stub sits *under* the queue, the cache, the SSE stream and
+the limiter rather than instead of them.
+
+- **It must never become a default.** A server quietly serving invented maps is
+  a worse failure than one that is plainly down. Hence the warning at startup
+  and `engine: "stub"` in `/api/health`.
+- **Its output must never reach a real cache.** Two independent guards: it
+  writes to `jobs/stub_<point>/` rather than the point's own directory — which
+  holds the real extract and the real result — and `cacheKey` mixes in a marker
+  when the engine is not real, so a normal server cannot read a stub result even
+  from the same `CACHE_DIR`. Do not remove either one; the second is what holds
+  when someone points a test at the working cache by mistake.
+- **It says nothing about acoustics.** The isophones it writes are concentric
+  rings. `sanity-check.mjs` and `compare-runs.mjs` remain the only way to ask
+  whether a real map is right, and they need a human reading the numbers.
+- CI runs it with `RATE_LIMIT_LOOPBACK=1` and `PARTIAL_INTERVAL_MS=800` on
+  purpose: with the defaults the limiter and frame checks report themselves as
+  skipped, and those are the routes nothing else covers.
+
+## Overpass
+
+One client for every caller (`overpassFetch` in `scripts/lib.mjs`), and
+everything about talking to a public instance lives there.
+
+- **Four mirrors, and the list is replaceable** through `OVERPASS_ENDPOINTS`.
+  Two of the four defaults answer from this machine; `kumi.systems` and
+  `private.coffee` do not, through the local proxy — they are in the list but
+  **unverified from here**.
+- **Check coverage before adding a mirror.** `overpass.osm.ch` is fast and
+  correct and carries only Switzerland: a Moscow query gets an empty answer
+  rather than an error. Ask a candidate for a point far outside its likely
+  region before trusting it.
+- **A cooldown is only taken from an instance that asked for one** — a
+  `Retry-After`, a 429, or a 403/404 that says this mirror is wrong for us. A
+  bare 504 means "busy this second" and is answered by the back-off between
+  rounds; cooling on it silences every mirror at once and turns the remaining
+  rounds into a formality. This was written the other way first, and the tests
+  caught it.
+- **`OVERPASS_BUDGET_MS` bounds the whole question**, and a single attempt gets
+  a share of what is left rather than all of it. Without that a silent mirror
+  eats the time the working ones would have used. The share is floored with
+  `Math.floor` — `AbortSignal.timeout` throws on a fractional delay, which the
+  tests also caught.
+- The retry loop takes its `fetch`, clock, sleep and cooldown map from the
+  caller (`test/overpass.test.mjs`). Keep it that way: none of this is testable
+  against the real thing.
 
 ## Cancelling, and why it is not a kill switch
 
