@@ -11,7 +11,7 @@ import { unlinkSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { bboxAround, bboxEwkt, utmSrid, fetchOsm } from './lib.mjs';
+import { bboxAround, bboxEwkt, utmSrid, fetchOsm, stripUnparsableTags } from './lib.mjs';
 import { writeDemAsc } from './dem.mjs';
 import { fetchRail, NIGHT_SHARE, TRAIN_TYPE } from './rail.mjs';
 import { lineSplitter } from '../shared/lines.mjs';
@@ -137,6 +137,40 @@ function releaseLock() {
   } catch {
     /* already gone */
   }
+}
+
+/**
+ * Removes the H2 database from a job directory, reporting the bytes freed.
+ *
+ * It is the expensive thing in there — ~46 MB against ~5 MB of OSM extract — and
+ * it is pure scratch: everything meant to outlive the run has been exported to
+ * GeoJSON by the time this is worth calling. Two callers, and they are not
+ * asking for the same thing:
+ *
+ * - before a run this is **correctness**. Import_OSM writes into fixed table
+ *   names and appends to whatever it finds, so a database left behind by a
+ *   killed run would be mixed into this one. That call stays regardless of
+ *   anything below it.
+ * - after a successful run this is **space**, and best effort by nature: a run
+ *   that is killed runs nothing at all. Which is precisely why the call above
+ *   is the guarantee and this one is only the tidying.
+ *
+ * Kept on failure on purpose — a job that died is the one somebody will want to
+ * open — and kept altogether under KEEP_JOB_DB=1, because `inspect_db.groovy`
+ * reads its tables and that is the only way to see what a block actually made.
+ */
+async function dropDatabase(jobDir) {
+  let freed = 0;
+  for (const entry of await readdir(jobDir)) {
+    if (!entry.startsWith('h2gisdb')) continue;
+    const file = path.join(jobDir, entry);
+    freed += await stat(file).then(
+      (s) => s.size,
+      () => 0,
+    );
+    await rm(file, { force: true });
+  }
+  return freed;
 }
 
 process.on('exit', releaseLock);
@@ -340,6 +374,20 @@ if (cached && cached.size > 0) {
     `  overpass: ${(bytes / 1024 / 1024).toFixed(1)} MB in ${((Date.now() - t0) / 1000).toFixed(1)}s via ${new URL(endpoint).host}`,
   );
 }
+
+// One tag whose value holds no digit — `height="Власова В.А."`, `maxspeed="RU:rural"`
+// — throws inside the osmosis parser and takes the whole tile with it. Cleaned
+// here rather than in fetchOsm so a *reused* extract is cleaned too: the file
+// already on disk is exactly the one carrying the tag that failed last time.
+{
+  const raw = await readFile(osmFile, 'utf8');
+  const { xml, dropped } = stripUnparsableTags(raw);
+  if (dropped > 0) {
+    await writeFile(osmFile, xml, 'utf8');
+    console.log(`  osm: снято ${dropped} нечисловых тегов (height/building:levels/maxspeed)`);
+  }
+}
+
 // Terrain is optional: it costs a little time and a few tile downloads, and on
 // genuinely flat ground it changes nothing.
 const demFile = path.join(jobDir, `dem_${args.demCellsize}.asc`);
@@ -381,11 +429,7 @@ emit('STAGE', 'import');
 
 // Import_OSM writes into fixed table names, so a leftover H2 file from a previous
 // run would be appended to rather than replaced. Drop it, keeping the OSM extract.
-for (const entry of await readdir(jobDir)) {
-  if (entry.startsWith('h2gisdb')) {
-    await rm(path.join(jobDir, entry), { force: true });
-  }
-}
+await dropDatabase(jobDir);
 
 const paramsPath = path.join(jobDir, 'params.json');
 await writeFile(
@@ -438,5 +482,19 @@ console.log(
     `after rounding (${sizes.features} features)`,
 );
 console.log(`  ${outFile}`);
+
+// The database is scratch from here on, and it is nine tenths of what a job
+// directory weighs. Without this a city-wide prewarm leaves gigabytes behind:
+// the drop before a run only ever reclaims a point that is computed twice, and
+// a batch computes each one once. The JVM has exited — runScriptRunner resolves
+// on the child's close — so nothing holds the file. Failing to delete is not
+// the job's failure; the next run of this point drops it anyway.
+if (process.env.KEEP_JOB_DB === '1') {
+  console.log('  swept: skipped, KEEP_JOB_DB=1 (inspect_db.groovy reads that database)');
+} else {
+  const freed = await dropDatabase(jobDir).catch(() => 0);
+  if (freed > 0) console.log(`  swept: ${(freed / 1e6).toFixed(0)} MB h2gisdb`);
+}
+
 console.log(`TOTAL ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 emit('RESULT', outFile);

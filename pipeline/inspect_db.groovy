@@ -5,14 +5,36 @@ import org.h2gis.api.ProgressVisitor
 import java.sql.Connection
 
 title = 'Inspect database'
-description = 'List columns of the tables named in NM_TABLES'
+description = 'List columns of the tables named in NM_TABLES, or run NM_QUERY'
 inputs = [:]
 outputs = [result: [name: 'result', title: 'result', description: 'schema dump', type: String.class]]
 
 def exec(Connection connection, Map input, ProgressVisitor progress) {
     Sql sql = new Sql(connection)
-    def wanted = (System.getenv('NM_TABLES') ?: 'LW_RAILWAY,RAIL_SECTIONS').split(',')
     StringBuilder out = new StringBuilder()
+
+    // A schema dump answers "what columns are there" but not "what is actually in
+    // them", and the questions that matter here — which row carries SRID 0, which
+    // geometry came out empty — are the second kind. Read-only by convention, not
+    // by enforcement: this runs against a job database nobody is serving from.
+    String query = System.getenv('NM_QUERY')
+    if (query) {
+        out.append("=== NM_QUERY ===\n").append(query).append('\n')
+        try {
+            sql.eachRow(query) { row ->
+                def meta = row.getMetaData()
+                def cells = (1..meta.getColumnCount()).collect { i ->
+                    "${meta.getColumnLabel(i)}=${row.getAt(i - 1)}"
+                }
+                out.append(cells.join('  ')).append('\n')
+            }
+        } catch (Exception e) {
+            out.append('ERROR: ').append(e.message).append('\n')
+        }
+        return out.toString()
+    }
+
+    def wanted = (System.getenv('NM_TABLES') ?: 'LW_RAILWAY,RAIL_SECTIONS').split(',')
 
     sql.eachRow("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='PUBLIC' ORDER BY TABLE_NAME") { row ->
         out.append("TABLE ").append(row.TABLE_NAME).append('\n')

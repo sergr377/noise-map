@@ -434,6 +434,55 @@ export async function overpassFetch(
 }
 
 /** Road and building data for one bounding box, written out as OSM XML. */
+
+/**
+ * OSM tags whose values NoiseModelling parses as numbers, and the one way it
+ * does it: `Double.parseDouble(value.replaceAll("[^0-9]+", ""))`. A value with
+ * no digit in it strips to the empty string, `parseDouble("")` throws
+ * `NumberFormatException: empty String`, and because this happens inside the
+ * osmosis SAX handler it aborts the whole parse — one bad tag anywhere in the
+ * extract costs the entire tile.
+ *
+ * Seen in the wild at 45.1070,39.1025, where a building carries
+ * `height="Власова В.А."` — somebody typed a surname into the height field —
+ * alongside three roads tagged `maxspeed="RU:rural"`, the implicit-speed
+ * notation. Both are legal OSM and neither is a number.
+ *
+ * See Import_OSM.groovy lines 1111, 1114 and 1333 in the distribution. Two other
+ * call sites of the same parse (1277, 1280) guard the empty string; these three
+ * do not, which is why this is a data problem rather than a configuration one.
+ */
+const NUMERIC_TAGS = ['height', 'building:levels', 'maxspeed'];
+
+/**
+ * Drops the tags above when their value carries no digit at all.
+ *
+ * Dropping rather than repairing is deliberate: a tag NoiseModelling cannot read
+ * is one it would have to default anyway, and inventing a number here — 90 km/h
+ * for `RU:rural`, say — would put a guess about Russian road law into an OSM
+ * reader. The default the engine already has is the honest answer.
+ *
+ * Only whole `<tag/>` elements are removed, so the document stays well-formed,
+ * and a value that does contain digits is left exactly as it was: `height="12 m"`
+ * still reaches the engine, which strips the unit itself.
+ *
+ * Idempotent, so it can run over a freshly fetched extract and a reused one
+ * alike — which is what it does, because a cached extract from before this
+ * existed is precisely the file that still carries the bad tag.
+ */
+export function stripUnparsableTags(xml) {
+  let dropped = 0;
+  const keys = NUMERIC_TAGS.map((k) => k.replace(':', ':')).join('|');
+  // Attribute values cannot contain a raw double quote, so [^"]* is exact here
+  // rather than a heuristic.
+  const pattern = new RegExp(`[ \t]*<tag k="(?:${keys})" v="([^"]*)"s*/>\r?\n?`, 'g');
+  const cleaned = xml.replace(pattern, (match, value) => {
+    if (/[0-9]/.test(value)) return match;
+    dropped += 1;
+    return '';
+  });
+  return { xml: cleaned, dropped };
+}
 export async function fetchOsm(bbox, outPath, { rounds = 3 } = {}) {
   const { body, endpoint } = await overpassFetch(overpassQuery(bbox), {
     rounds,
