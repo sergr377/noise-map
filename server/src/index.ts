@@ -641,7 +641,17 @@ const server = http.createServer(async (req, res) => {
       // `engine` is only ever absent from a normal server. It is reported so a
       // check running against the wrong process — a stub left over from a test
       // run — finds out from the first request rather than from the map.
-      return sendJson(res, 200, { ok: true, ...(ENGINE_IS_REAL ? {} : { engine: 'stub' }) });
+      //
+      // `params` is half of the cache key, so it is also the answer to "will
+      // this batch land in a cache anyone can read". A prewarming plan is built
+      // for one radius and is worthless against a server running another; the
+      // probe route cannot say which, because for a covered point it reports the
+      // covering result's radius rather than the configured one.
+      return sendJson(res, 200, {
+        ok: true,
+        params: JOB_PARAMS,
+        ...(ENGINE_IS_REAL ? {} : { engine: 'stub' }),
+      });
     }
 
     const ip = clientIp(req);

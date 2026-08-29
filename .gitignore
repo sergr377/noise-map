@@ -16,3 +16,9 @@ cache/
 .env
 .env.*
 !.env.example
+
+# Логи длинных батчей прогрева
+logs/
+
+# Аварийные дампы Git Bash под Windows
+*.stackdump
