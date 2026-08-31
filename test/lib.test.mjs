@@ -6,7 +6,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bandMid, bboxAround, bboxEwkt, overpassQuery, utmSrid } from '../scripts/lib.mjs';
+import {
+  bandMid,
+  bboxAround,
+  bboxEwkt,
+  overpassQuery,
+  stripUnparsableTags,
+  utmSrid,
+} from '../scripts/lib.mjs';
 
 test('bandMid takes the middle of a closed band', () => {
   assert.equal(bandMid('35-40'), 37.5);
@@ -69,4 +76,46 @@ test('the Overpass query covers roads, buildings and land cover', () => {
   // south,west,north,east — the order Overpass expects, and a swap here is
   // both silent and catastrophic.
   assert.ok(query.includes('(55.7,37.6,55.8,37.7)'), 'bbox order');
+});
+
+test('stripUnparsableTags drops numeric tags with no digit in them', () => {
+  // NoiseModelling parses these as Double.parseDouble(v.replaceAll("[^0-9]+","")),
+  // so a value without a digit strips to "" and throws inside the SAX handler —
+  // taking the whole extract with it, not just the one object.
+  const xml =
+    '<osm>\n' +
+    '    <tag k="height" v="Власова В.А."/>\n' +
+    '    <tag k="maxspeed" v="RU:rural"/>\n' +
+    '    <tag k="building:levels" v="ground"/>\n' +
+    '</osm>';
+  const { xml: cleaned, dropped } = stripUnparsableTags(xml);
+  assert.equal(dropped, 3);
+  assert.ok(!cleaned.includes('<tag'), 'every unparsable tag must be gone');
+  assert.ok(cleaned.startsWith('<osm>') && cleaned.trim().endsWith('</osm>'), 'still well formed');
+});
+
+test('stripUnparsableTags keeps anything the engine can read', () => {
+  // "12 m" survives because the engine strips the unit itself, and tags it never
+  // parses as numbers are none of this function's business.
+  const xml =
+    '<osm>\n' +
+    '    <tag k="height" v="12 m"/>\n' +
+    '    <tag k="maxspeed" v="60"/>\n' +
+    '    <tag k="name" v="улица Дорохова"/>\n' +
+    '    <tag k="building" v="warehouse"/>\n' +
+    '</osm>';
+  const { xml: cleaned, dropped } = stripUnparsableTags(xml);
+  assert.equal(dropped, 0);
+  assert.equal(cleaned, xml);
+});
+
+test('stripUnparsableTags is idempotent', () => {
+  // It runs over reused extracts as well as fresh ones, so a second pass over an
+  // already-cleaned file has to be a no-op rather than eat something else.
+  const once = stripUnparsableTags(
+    '<osm>\n  <tag k="height" v="нет"/>\n  <tag k="height" v="9"/>\n</osm>',
+  );
+  assert.equal(once.dropped, 1);
+  assert.equal(stripUnparsableTags(once.xml).dropped, 0);
+  assert.ok(once.xml.includes('v="9"'), 'the readable one stays');
 });

@@ -377,7 +377,6 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
             tableBuilding     : 'BUILDINGS',
             tableRoads        : 'ROADS',
             tableReceivers    : 'RECEIVERS',
-            tableGroundAbs    : 'GROUND',
             confMaxSrcDist    : p.maxSrcDist as Double,
             confDiffVertical  : p.diffVertical as Boolean,
             confDiffHorizontal: p.diffHorizontal as Boolean,
@@ -386,6 +385,32 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
     ]
     if (withDem) {
         noiseInputs['tableDEM'] = 'DEM'
+    }
+
+    // Ground absorption only when there is any. H2GIS carries the projection on
+    // the geometries, not on the column — Import_OSM declares THE_GEOM as a bare
+    // `geometry` — so a GROUND table with no rows reports SRID 0, and
+    // Noise_level_from_traffic rejects it outright with "Please use a metric
+    // projection for GROUND" before computing anything.
+    //
+    // Measured on 45.0160,39.2586, which died there twice: the OSM reader counted
+    // six land-cover ways and inserted none of them, leaving BUILDINGS with 1697
+    // rows and a usable SRID against GROUND with zero rows and none.
+    //
+    // The block declares tableGroundAbs optional (min: 0) and falls back to its
+    // own default absorption, which is precisely what an empty table means. So
+    // the fix is to stop passing the table rather than to fake an SRID or insert
+    // a placeholder polygon — neither of which would carry any information, and
+    // the second of which would quietly alter the acoustics.
+    Sql groundSql = new Sql(connection)
+    boolean groundExists = groundSql.firstRow(
+            "SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.TABLES " +
+                    "WHERE TABLE_SCHEMA = 'PUBLIC' AND TABLE_NAME = 'GROUND'").n > 0
+    boolean withGround = groundExists && groundSql.firstRow('SELECT COUNT(*) AS n FROM GROUND').n > 0
+    if (withGround) {
+        noiseInputs['tableGroundAbs'] = 'GROUND'
+    } else {
+        logger.info('GROUND пуста — поглощение грунта по умолчанию движка')
     }
 
     // 3a. Предварительная карта: вся площадь сразу, пока точный расчёт заполнял
@@ -521,17 +546,21 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
         // LW_RAILWAY is self-contained: Railway_Emission_from_Traffic writes
         // geometry alongside third-octave levels per period (HZD*/HZE*/HZN*), so
         // it goes in as the sources table rather than as a separate emission one.
-        new Noise_level_from_source().exec(connection, [
+        def railInputs = [
                 tableBuilding         : 'BUILDINGS',
                 tableSources          : 'LW_RAILWAY',
                 tableReceivers        : 'RECEIVERS',
-                tableGroundAbs        : 'GROUND',
                 confMaxSrcDist        : p.maxSrcDist as Double,
                 confDiffVertical      : p.diffVertical as Boolean,
                 confDiffHorizontal    : p.diffHorizontal as Boolean,
                 confReflOrder         : p.reflOrder as Integer,
                 confThreadNumber      : 0
-        ], pv)
+        ]
+        // Same empty-table trap as the road pass above.
+        if (withGround) {
+            railInputs['tableGroundAbs'] = 'GROUND'
+        }
+        new Noise_level_from_source().exec(connection, railInputs, pv)
         stamp('Noise_level_from_source (rail)')
 
         sql.execute('DROP TABLE IF EXISTS RAIL_LEVEL')

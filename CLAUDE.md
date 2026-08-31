@@ -22,8 +22,11 @@ node scripts/rail-probe.mjs <lat> <lon>                # what OSM knows about tr
 # needs the server built first (npm run build:server):
 node scripts/check-quantize.mjs                        # cache grid idempotence
 
+node scripts/plan-tiles.mjs krasnodar                  # city-wide tile plan (Overpass only)
+
 # needs the API running on :8787:
 node scripts/prewarm.mjs moscow                        # warm the demo cache
+node scripts/prewarm.mjs --plan plans/krasnodar.json --share 0.95   # warm a whole city
 node scripts/smoke-api.mjs                             # end-to-end check of the HTTP layer
 
 # the same end-to-end check without Java, Overpass or minutes of CPU — this is
@@ -32,11 +35,18 @@ RUN_JOB_SCRIPT=scripts/fake-job.mjs CACHE_DIR=/tmp/noise-cache npm run server
 ```
 
 `inspect_db.groovy` dumps table schemas from a job database — this is how you find
-out what a NoiseModelling block actually produced:
+out what a NoiseModelling block actually produced. A successful run sweeps that
+database, so the run whose tables you want has to be started with `KEEP_JOB_DB=1`
+(a *failed* run keeps its own without asking):
 
 ```bash
 NM_TABLES=LW_RAILWAY,ROADS .tools/nm/NoiseModelling_6.0.0/bin/ScriptRunner \
   -w jobs/<id> -s pipeline/inspect_db.groovy
+
+# NM_QUERY runs SQL instead, for the questions a schema dump cannot answer —
+# which row carries SRID 0, which geometry came out empty:
+NM_QUERY="SELECT COUNT(*) n, ST_SRID(THE_GEOM) srid FROM GROUND GROUP BY 2" \
+  .tools/nm/NoiseModelling_6.0.0/bin/ScriptRunner -w jobs/<id> -s pipeline/inspect_db.groovy
 ```
 
 ## Computation is expensive, and that shapes everything
@@ -145,6 +155,27 @@ The full annotated list is in the README under "Грабли". The ones that bit
   `Delaunay_Grid` builds its mesh from building and road outlines, and the area cap
   almost never binds where there is anything to compute. Measured, after it was
   proposed as the basis of a cheap rough prepass.
+- **An empty `GROUND` table has no SRID, and propagation refuses it.** H2GIS
+  carries the projection on the geometries, not on the column — `Import_OSM`
+  declares `THE_GEOM` as a bare `geometry` — so a table with no rows reports
+  SRID 0 and `Noise_level_from_traffic` throws *"Please use a metric projection
+  for GROUND"* before computing anything. Measured on 45.0160,39.2586, where the
+  OSM reader counted six land-cover ways and inserted none: `BUILDINGS` had 1697
+  rows and a usable SRID, `GROUND` zero rows and none. `tableGroundAbs` is
+  optional (`min: 0`), so the pipeline passes it only when the table has rows —
+  do not "fix" this with a placeholder polygon, which would alter the acoustics
+  to say something the data never said.
+- **One unparsable OSM tag kills the whole extract.** `Import_OSM` reads
+  `height`, `building:levels` and `maxspeed` as
+  `Double.parseDouble(v.replaceAll("[^0-9]+", ""))` (lines 1111, 1114, 1333); a
+  value with no digit strips to `""` and throws `NumberFormatException: empty
+  String` inside the osmosis SAX handler, aborting the parse for every object in
+  the file. Real data does this: `height="Власова В.А."` and `maxspeed="RU:rural"`
+  both appear in Krasnodar. `stripUnparsableTags` in `lib.mjs` drops those tags
+  before the engine sees them, and `run-job.mjs` applies it to *reused* extracts
+  too — the cached file is exactly the one carrying the tag that failed before.
+  Two other call sites of the same parse (1277, 1280) do guard the empty string,
+  which is why this reads as a data problem rather than a configuration one.
 - Results come out in a metric projection; the web needs `Change_SRID` to 4326.
 - `CREATE TABLE AS SELECT` leaves columns nullable in H2 and a primary key will not
   accept them — `SET NOT NULL` first.
@@ -222,6 +253,13 @@ state. `startJob` must therefore replace it rather than join it, and the evictio
 timer checks identity before deleting — otherwise it removes the *new* job that
 took the same id.
 
+**A failed job is a tombstone too, and that bites when fixing the pipeline.** For
+as long as it sits in the map, a fresh request for that point is answered with
+the old failure instead of starting a run — so a pipeline fix appears to change
+nothing, the job directory is not even touched, and the error text is identical
+to the one just fixed. Restart the server (or `DELETE /api/noise/:id`) before
+retrying a point that failed minutes ago. This wasted a cycle on 2026-08-29.
+
 ## One run per job directory
 
 A job directory is named after the point (`jobs/<lat>_<lon>_r<radius>s<srcRadius>`)
@@ -244,6 +282,18 @@ reporting itself through an `@@ERROR` marker that the server shows as-is.
 - **The directory stays per-point on purpose.** A per-run subdirectory would also
   have prevented this, but the directory doubles as a cache: the OSM extract and
   the DEM raster are reused by later runs of the same point.
+- **The H2 database is dropped twice, for two different reasons.** Before a run
+  it is correctness — `Import_OSM` appends to fixed table names, so a database
+  left by a killed run would be mixed into the next one, and that call must stay
+  whatever else changes. After a successful run it is space: measured at 11 MB
+  on a sparse Krasnodar tile and 46 MB on a dense one, three to ten times
+  everything else in the directory put together. The pre-run drop reclaims only
+  a point computed *twice*, which in a city-wide batch is none of them. The
+  second drop is best effort by definition — a killed run runs nothing — which
+  is exactly why the first one is the guarantee.
+- **A failed run keeps its database**, and `KEEP_JOB_DB=1` keeps every run's:
+  `inspect_db.groovy` reads its tables, and that is the only way to find out
+  what a NoiseModelling block actually produced.
 
 ## The preview pass
 
@@ -337,6 +387,39 @@ centre, which the interface explains rather than hides.
 Grid snapping must stay idempotent: the longitude step is computed from the
 already-snapped latitude. `check-quantize.mjs` verifies this across ~88 000 points;
 run it after any change to `quantize`.
+
+## Warming a whole city
+
+`plan-tiles.mjs` writes a plan — a triangular lattice of discs over OSM
+boundaries, ranked by how many buildings each disc is the nearest to — and
+`prewarm.mjs --plan --share` computes the top of it. Krasnodar: 254 tiles for
+95% of the buildings, ~18 h, 390 MB, against 632 tiles for the whole okrug.
+
+- **The ranking is what makes the plan useful**, not the lattice. 155 of those
+  632 tiles own no building, and 85 have no traffic road in their extraction
+  square at all — those die at `import`. The order is descending by owned
+  buildings, so `--share` cuts a prefix and an interrupted batch has computed
+  the populated half of the city rather than an arbitrary corner.
+- **A plan is bound to `JOB_PARAMS.radius`**, which is half of the cache key: a
+  plan for 750 fills a cache a server on 500 can never read. `/api/health` now
+  reports `JOB_PARAMS` for exactly this check, and `prewarm.mjs` refuses to
+  start on a mismatch. Do not answer this from the probe route — for a covered
+  point it reports the *covering* result's radius, not the configured one.
+- **The runtime estimate is a fit, not a promise**: `0.073·buildings +
+  0.087·roads`, R² = 0.71 over 14 runs, floored at 120 s plus 40 s for Overpass.
+  Buildings alone give R² = 0.01. Re-fit it if the operating point moves.
+- **`scripts/geo.mjs` is separate from `lib.mjs` on purpose.** Importing
+  `lib.mjs` installs a global undici `ProxyAgent`, which is what makes Overpass
+  reachable here — and would send `prewarm.mjs`'s calls to a *localhost* API
+  through the proxy, where they die as "other side closed". That happened;
+  pure geometry lives where it forces no such choice.
+- The batch resumes by itself: a cached tile is skipped in milliseconds, so
+  re-running the same command continues it. `PREWARM_ALLOW_STUB=1` is the only
+  way to exercise the plan path against `fake-job.mjs`.
+- A finished tile leaves its OSM extract (2–5 MB) and DEM behind on purpose —
+  that is what makes a recomputed point skip Overpass. The H2 database is swept
+  (see below), so a 254-tile batch costs ~1.4 GB of `jobs/` rather than the
+  4–13 GB it would otherwise.
 
 ## Frontend: what is easy to break
 
