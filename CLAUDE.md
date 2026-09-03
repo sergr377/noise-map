@@ -29,6 +29,10 @@ node scripts/prewarm.mjs moscow                        # warm the demo cache
 node scripts/prewarm.mjs --plan plans/krasnodar.json --share 0.95   # warm a whole city
 node scripts/smoke-api.mjs                             # end-to-end check of the HTTP layer
 
+# needs a server started with CACHE_ONLY=1, pointed at a CACHE_DIR that is not
+# empty — the mode cannot fill it, so it has to be filled first:
+node scripts/smoke-cache-only.mjs                      # the refuse-to-compute mode
+
 # the same end-to-end check without Java, Overpass or minutes of CPU — this is
 # what CI runs, and what to use when the question is about the HTTP layer:
 RUN_JOB_SCRIPT=scripts/fake-job.mjs CACHE_DIR=/tmp/noise-cache npm run server
@@ -66,6 +70,16 @@ A cold job takes **6–27 minutes across every core and up to 2.2 GB**. Therefor
   empties the cache in effect and the three cost half an hour to warm again.
 - Run long jobs in the background and poll no more often than every few tens of
   seconds.
+- **`CACHE_ONLY=1` is the lever for a small host**, and it is the answer to "one
+  click owns every core for a quarter of an hour": the API keeps serving whatever
+  is cached and answers 503 to anything that would start work — before the job
+  bucket is even consulted, so nothing is charged and nothing starts. What makes
+  it usable rather than merely safe is a *pair* of rules: refuse the new, and keep
+  answering everything that starts nothing — the probe and the shaded areas — or
+  the visitor gets a grey map and no explanation. `smoke-cache-only.mjs` checks
+  both halves, and CI runs it against the cache the main smoke step just filled.
+  `/api/health` reports `cacheOnly: true`, so a deployed server can be asked which
+  mode it is in rather than probed with a click.
 
 ## Environment
 
@@ -488,8 +502,8 @@ enable it by default.
 - **Mark unverified things as unverified.** One of the four Overpass mirrors has
   never answered from here, and the README and `tasks.md` say so rather than
   presenting the list as four working mirrors. The same held for the Docker image
-  until it was built, and what is *still* unverified about it — a cold job driven
-  through the server rather than through `run-job.mjs` — is written down too.
+  until it was built, and what is *still* unverified about it — the same job under
+  a *smaller* memory limit, where the heap is a quarter of it — is written down too.
 - Code comments are in **English**; this file is in **English**; the README and
   commit messages are in **Russian**.
 - Comments explain *why*, not *what*. The valuable ones record a non-obvious
