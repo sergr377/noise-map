@@ -81,9 +81,24 @@ A cold job takes **6–27 minutes across every core and up to 2.2 GB**. Therefor
   and the map looks broken everywhere at once. This has happened; the server now
   prints whether a proxy is configured at startup, and a job that dies before it
   has any OSM data says so instead of blaming the location.
-- **Docker cannot be built here**: virtualisation is disabled in firmware and the
-  session has no administrator rights. The `Dockerfile` exists but has never been
-  built.
+- **The image is built and works** (2026-09-02): 5 m 51 s to build, 999.6 MB, and a
+  cold job finishes inside the container at a 1495 MiB peak. Two things the host
+  does not teach you. The JVM sizes its heap from the *container* limit —
+  `MaxRAMPercentage=25` of `mem_limit: 4g` is exactly 1 GB, against the 2203 MB
+  peak measured on the host — so the ceiling is raised by raising the container
+  limit, not by anything inside the process. The densest tile there is survives
+  that ceiling: Tverskaya at the server's own `JOB_PARAMS` finishes in 17.8 min
+  at a 1630 MiB container peak, with the same receiver count the host produced
+  (33 891 against 34 101), so **the 2203 MB host figure was headroom, not need** —
+  a JVM given gigabytes simply collects later. What is untested is a *smaller*
+  limit: 3 GB would mean a 768 MB heap. And **DNS inside the container is
+  flaky**: one `ENOTFOUND` in six consecutive lookups. A server-initiated job died
+  exactly that way, because `fetchTile` was a single bare `fetch` and every tile
+  goes through one `Promise.all`. It now retries — four attempts on `backoffDelay`
+  with a 300 ms base, the whole ladder inside ~2 s — and the retry earns its keep
+  on the real network: 20 tile fetches, one `EAI_AGAIN`, 229 ms instead of a dead
+  job. **Anything else here that fetches over the network needs the same
+  treatment**; the host will not tell you, because on the host DNS does not blink.
 - The engine launcher is named differently per platform: `ScriptRunner.bat` on
   Windows, `ScriptRunner` on Linux. The `process.platform` branch already exists —
   do not hardcode it back.
@@ -210,9 +225,11 @@ One client for every caller (`overpassFetch` in `scripts/lib.mjs`), and
 everything about talking to a public instance lives there.
 
 - **Four mirrors, and the list is replaceable** through `OVERPASS_ENDPOINTS`.
-  Two of the four defaults answer from this machine; `kumi.systems` and
-  `private.coffee` do not, through the local proxy — they are in the list but
-  **unverified from here**.
+  Two of the four defaults answer from this machine directly; `kumi.systems` and
+  `private.coffee` do not, through the local proxy. From inside the Docker
+  container, which has no proxy, `kumi.systems` **does** answer — 7.2 MB in 24.3 s,
+  and it served the first calculation run in Docker — so the one still
+  **unverified from anywhere here** is `private.coffee`.
 - **Check coverage before adding a mirror.** `overpass.osm.ch` is fast and
   correct and carries only Switzerland: a Moscow query gets an empty answer
   rather than an error. Ask a candidate for a point far outside its likely
@@ -468,8 +485,11 @@ enable it by default.
   work. One of those two tasks was abandoned as a result.
 - **Write down negative results.** Thinning the terrain grid buys nothing — that is
   in the README so nobody tries it again.
-- **Mark unverified things as unverified.** The Docker image was never built, and
-  that is stated plainly in the README and in the file headers.
+- **Mark unverified things as unverified.** One of the four Overpass mirrors has
+  never answered from here, and the README and `tasks.md` say so rather than
+  presenting the list as four working mirrors. The same held for the Docker image
+  until it was built, and what is *still* unverified about it — a cold job driven
+  through the server rather than through `run-job.mjs` — is written down too.
 - Code comments are in **English**; this file is in **English**; the README and
   commit messages are in **Russian**.
 - Comments explain *why*, not *what*. The valuable ones record a non-obvious
