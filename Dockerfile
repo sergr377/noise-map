@@ -1,7 +1,10 @@
 # Единый образ: Node отдаёт фронтенд и API, JVM считает акустику.
 #
-# ВНИМАНИЕ: образ не собирался и не проверялся — на машине разработки нет Docker.
-# Первую сборку стоит прогнать локально и убедиться, что ScriptRunner стартует.
+# Собран и проверен 2026-09-02: сборка 5 мин 51 с, образ 999.6 МБ, холодный расчёт
+# в контейнере доходит до конца при пике 1495 МиБ. Две вещи, которых с хоста не
+# видно: JVM берёт кучу как четверть лимита контейнера (1 ГБ при mem_limit 4g,
+# против 2203 МБ пика на хосте), и DNS внутри контейнера мигает — загрузка рельефа
+# в dem.mjs ретрая не имеет и этого не переживает. Подробности в tasks.md.
 
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
@@ -12,6 +15,10 @@ RUN npm ci
 COPY tsconfig*.json vite.config.ts ./
 COPY server ./server
 COPY web ./web
+# server/src и scripts/run-job.mjs импортируют shared/ относительным путём, так
+# что каталог нужен обеим стадиям — и убирать его нельзя ни из одной: без него
+# здесь падает tsc (TS2307), а в рантайме сервер умирает на первом импорте.
+COPY shared ./shared
 
 # Vite вшивает ключ в бандл на этапе сборки, поэтому он нужен здесь, а не при
 # запуске. Это безопасно: ключ JS API ограничен по HTTP Referer и всё равно
@@ -47,6 +54,7 @@ COPY --from=build /app/server/dist ./server/dist
 COPY --from=build /app/dist-web ./dist-web
 COPY pipeline ./pipeline
 COPY scripts ./scripts
+COPY shared ./shared
 
 # jobs/ и cache/ — рабочие каталоги; в compose под них подключён том.
 RUN mkdir -p jobs cache

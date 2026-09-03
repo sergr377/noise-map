@@ -9,12 +9,16 @@
  */
 import { writeFile } from 'node:fs/promises';
 import { PNG } from 'pngjs';
-// Imported for the side effect: it installs the proxy dispatcher that Node's
-// fetch otherwise ignores.
-import './lib.mjs';
+// Imported for the proxy dispatcher it installs as a side effect — Node's fetch
+// ignores HTTPS_PROXY without it — and for `backoffDelay`, the same jittered
+// ladder the Overpass loop climbs. A tile has no second mirror to fall back on,
+// but the reason for spreading retries out rather than hammering is the same.
+import { backoffDelay } from './lib.mjs';
 
 const TILE_SIZE = 256;
 const TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium';
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const lonToTileX = (lon, z) => ((lon + 180) / 360) * 2 ** z;
 
@@ -23,12 +27,86 @@ function latToTileY(lat, z) {
   return ((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * 2 ** z;
 }
 
-async function fetchTile(z, x, y) {
-  const res = await fetch(`${TILE_URL}/${z}/${x}/${y}.png`, {
-    signal: AbortSignal.timeout(60_000),
-  });
-  if (!res.ok) throw new Error(`тайл ${z}/${x}/${y}: HTTP ${res.status}`);
-  return PNG.sync.read(Buffer.from(await res.arrayBuffer()));
+/**
+ * What a status from the tile bucket means for a retry loop.
+ *
+ * Unlike Overpass there is nowhere else to ask, so the only question is whether
+ * asking again could change the answer. A 404 is the bucket saying this tile
+ * does not exist, which stays true on the tenth attempt; 429 and the 5xx family
+ * are it saying "not now".
+ */
+export function tileVerdict(status) {
+  if (status >= 200 && status < 300) return 'ok';
+  if (status === 429 || status >= 500) return 'retry';
+  return 'gone';
+}
+
+/**
+ * One Terrarium tile, retried.
+ *
+ * This was a single bare `fetch`, and on a development host that was enough:
+ * DNS there does not blink. Inside a container it does — one `ENOTFOUND` in six
+ * consecutive lookups, measured — and because the tiles are gathered with one
+ * `Promise.all`, a single failed lookup took the whole job down with it, after
+ * Overpass had already spent its megabytes and its half-minute.
+ *
+ * The ladder is deliberately much shorter than the Overpass one, 300 ms against
+ * 5 s: a tile is a couple of hundred kilobytes off a CDN, a handful of them
+ * stand between the caller and the first stage of the calculation, and four
+ * attempts spread over about two seconds are free against a job that costs
+ * minutes. What is not free is retrying something that cannot succeed, which is
+ * what `tileVerdict` is for.
+ *
+ * A decode failure is retried too, on purpose: a truncated body from a
+ * connection that dropped mid-download reads as a corrupt PNG, and that is
+ * exactly the case a second attempt fixes.
+ *
+ * The network, the sleep and the randomness come from the caller for the same
+ * reason they do in `overpassFetch` — a test that needs a real resolver to fail
+ * on cue is not a test.
+ */
+export async function fetchTile(
+  z,
+  x,
+  y,
+  {
+    attempts = 4,
+    timeoutMs = 60_000,
+    fetchImpl = fetch,
+    sleepImpl = sleep,
+    random = Math.random,
+    log = console.warn,
+  } = {},
+) {
+  const label = `тайл ${z}/${x}/${y}`;
+  let problem = 'не начиналось';
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let fatal = false;
+    try {
+      const res = await fetchImpl(`${TILE_URL}/${z}/${x}/${y}.png`, {
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const verdict = tileVerdict(res.status);
+      if (verdict === 'ok') return PNG.sync.read(Buffer.from(await res.arrayBuffer()));
+      problem = `HTTP ${res.status}`;
+      fatal = verdict === 'gone';
+    } catch (err) {
+      // Node's fetch reduces every network problem to a bare "fetch failed";
+      // the code that says which one — EAI_AGAIN, ECONNRESET — sits one level
+      // deeper in err.cause, and it is the only part worth reading in a log.
+      problem = `${err.message}${err.cause?.code ? ` (${err.cause.code})` : ''}`;
+    }
+
+    if (fatal) throw new Error(`${label}: ${problem}`);
+    if (attempt < attempts) {
+      const wait = backoffDelay(attempt, { base: 300, cap: 5000, random });
+      log(`  ${label}: ${problem}, повтор ${attempt + 1}/${attempts} через ${wait} мс`);
+      await sleepImpl(wait);
+    }
+  }
+
+  throw new Error(`${label}: ${problem}, попыток ${attempts}`);
 }
 
 /**
@@ -38,7 +116,11 @@ async function fetchTile(z, x, y) {
  * harmless here, because NoiseModelling turns the raster into a point cloud and
  * reprojects each point individually.
  */
-export async function writeDemAsc(bbox, outPath, { zoom = 12, cellsize = 0.00025 } = {}) {
+export async function writeDemAsc(
+  bbox,
+  outPath,
+  { zoom = 12, cellsize = 0.00025, tile = {} } = {},
+) {
   const { south, west, north, east } = bbox;
 
   const minTileX = Math.floor(lonToTileX(west, zoom));
@@ -54,7 +136,7 @@ export async function writeDemAsc(bbox, outPath, { zoom = 12, cellsize = 0.00025
   for (let x = minTileX; x <= maxTileX; x++) {
     for (let y = minTileY; y <= maxTileY; y++) wanted.push([x, y]);
   }
-  const fetched = await Promise.all(wanted.map(([x, y]) => fetchTile(zoom, x, y)));
+  const fetched = await Promise.all(wanted.map(([x, y]) => fetchTile(zoom, x, y, tile)));
   const tiles = new Map(wanted.map(([x, y], i) => [`${x}/${y}`, fetched[i]]));
 
   const cols = Math.max(2, Math.ceil((east - west) / cellsize));
