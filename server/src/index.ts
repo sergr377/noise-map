@@ -647,10 +647,15 @@ const server = http.createServer(async (req, res) => {
       // for one radius and is worthless against a server running another; the
       // probe route cannot say which, because for a covered point it reports the
       // covering result's radius rather than the configured one.
+      // `cacheOnly` is here for the same reason as `engine`: it is a server
+      // that answers differently, and both the operator who just deployed with
+      // the flag and the check that exercises the mode need to find that out
+      // from a request rather than from a click that got a 503.
       return sendJson(res, 200, {
         ok: true,
         params: JOB_PARAMS,
         ...(ENGINE_IS_REAL ? {} : { engine: 'stub' }),
+        ...(CACHE_ONLY ? { cacheOnly: true } : {}),
       });
     }
 

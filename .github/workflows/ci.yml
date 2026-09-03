@@ -74,6 +74,31 @@ jobs:
           kill $server 2> /dev/null || true
           exit $status
 
+      # Читает кэш, который наполнил предыдущий шаг, поэтому CACHE_DIR тот же —
+      # и заглушка тоже та же: признак подмены входит в ключ кэша, так что
+      # сервер с настоящим движком не прочитал бы записанное заглушкой даже из
+      # этого же каталога. Режим ничего не считает, движок ему нужен только
+      # затем, чтобы ключи совпали.
+      - name: Режим только из кэша
+        env:
+          PORT: 8787
+          RUN_JOB_SCRIPT: scripts/fake-job.mjs
+          CACHE_DIR: ${{ runner.temp }}/noise-cache
+          CACHE_ONLY: 1
+        run: |
+          node server/dist/index.js &
+          server=$!
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8787/api/health > /dev/null && break
+            sleep 1
+          done
+          set +e
+          node scripts/smoke-cache-only.mjs
+          status=$?
+          set -e
+          kill $server 2> /dev/null || true
+          exit $status
+
       # No VITE_YANDEX_API_KEY here on purpose: the key is missing at build time
       # and the bundle still has to come out. It fails in the browser instead,
       # with a message that says which key to set.
