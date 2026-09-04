@@ -20,5 +20,9 @@ cache/
 # Логи длинных батчей прогрева
 logs/
 
+# Надстройка compose под конкретный хост: порт, TRUST_PROXY, CACHE_ONLY. Это
+# свойство машины, а не проекта, и на каждом хосте она своя.
+docker-compose.override.yml
+
 # Аварийные дампы Git Bash под Windows
 *.stackdump

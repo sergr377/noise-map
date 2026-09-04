@@ -113,6 +113,11 @@ A cold job takes **6–27 minutes across every core and up to 2.2 GB**. Therefor
   on the real network: 20 tile fetches, one `EAI_AGAIN`, 229 ms instead of a dead
   job. **Anything else here that fetches over the network needs the same
   treatment**; the host will not tell you, because on the host DNS does not blink.
+- **A reverse proxy in front of the container must dial `127.0.0.1`, not
+  `localhost`.** Where `localhost` resolves to `::1` first, the proxy reaches IPv6
+  while Docker publishes the port on IPv4 only; the failure surfaces as a 502 from
+  the edge with a perfectly healthy container behind it, which sends you looking
+  at the wrong end. Measured here, and it cost an hour.
 - The engine launcher is named differently per platform: `ScriptRunner.bat` on
   Windows, `ScriptRunner` on Linux. The `process.platform` branch already exists —
   do not hardcode it back.
@@ -397,9 +402,18 @@ idempotent**, because the count is per address and a double release would hand
 back somebody else's slot.
 
 Loopback is exempt from all of it so `prewarm.mjs` can run; set
-`RATE_LIMIT_LOOPBACK=1` to test the limits locally. `X-Forwarded-For` is read only under `TRUST_PROXY=1`, because
-trusting it on a directly reachable server disables the limiter for anyone who
-sends the header.
+`RATE_LIMIT_LOOPBACK=1` to test the limits locally.
+
+**That exemption is a trap behind a reverse proxy on the same host.** The socket
+address is then `127.0.0.1` for everyone, so without `TRUST_PROXY=1` every
+visitor is exempt from every bucket — not sharing one bucket, exempt from all of
+them — and `/api/geocode` starts spending somebody else's quota on our geocoder
+key. `X-Forwarded-For` is read only under `TRUST_PROXY=1`, and trusting it is
+only safe while the published port is bound to loopback, because on a directly
+reachable server the header is forged in one line. **The two settings are a
+pair; neither is correct on its own.** Measured: without `TRUST_PROXY` the
+counter did not move at all; with it, forty requests took `RateLimit-Remaining`
+from 60 to 24.
 
 ## Cache
 
