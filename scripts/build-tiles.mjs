@@ -52,8 +52,7 @@ const PLANETILER_JAR = path.join(TOOLS_DIR, 'planetiler.jar');
 const PLANETILER_URL =
   'https://github.com/onthegomap/planetiler/releases/download/v0.10.2/planetiler.jar';
 
-const FONTS_URL =
-  'https://github.com/openmaptiles/fonts/releases/download/v2.0/noto-sans.zip';
+const FONTS_URL = 'https://github.com/openmaptiles/fonts/releases/download/v2.0/noto-sans.zip';
 /**
  * Начертания, которые называет стиль. Распаковывается только они: в архиве их
  * втрое больше, а каждое — это сотни файлов по диапазонам кодов.
