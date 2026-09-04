@@ -17,6 +17,10 @@ cache/
 # в basemap/style.json.
 tiles/
 
+# Источники Planetiler: экстракт OSM, Natural Earth, полигоны воды. Скрипт
+# уводит их в .tools/, но старая сборка могла оставить каталог здесь.
+data/
+
 # Secrets: API keys live here, never in git. .env.example holds the template.
 .env
 .env.*

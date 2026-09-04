@@ -56,8 +56,8 @@ export interface IsophoneCollection {
   features: Array<{
     type: 'Feature';
     // Positions are [lon, lat] pairs, which is what both GeoJSON and the map's
-    // LngLat expect — keeping the tuple width exact lets the geometry be handed
-    // to YMapFeature without a cast.
+    // LngLat expect — keeping the tuple width exact lets the geometry go into a
+    // map source without a cast.
     geometry:
       | { type: 'Polygon'; coordinates: [number, number][][] }
       | { type: 'MultiPolygon'; coordinates: [number, number][][][] };
@@ -70,7 +70,7 @@ export interface Place {
   description: string;
   lat: number;
   lon: number;
-  /** Geocoder confidence: exact | number | near | street | other. */
+  /** How closely the geocoder hit: exact | street | area | other. */
   precision: string;
 }
 

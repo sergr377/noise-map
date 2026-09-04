@@ -19,7 +19,8 @@
  *   node scripts/build-tiles.mjs --skip-tiles    # только глифы и стиль
  *
  * Переменные окружения: TILES_DIR (куда класть), TILES_AREA и TILES_BOUNDS
- * (что собирать), PLANETILER_XMX (сколько кучи давать JVM).
+ * (что собирать), PLANETILER_XMX (сколько кучи давать JVM) и
+ * PLANETILER_STORAGE — где Planetiler держит карту узлов.
  */
 import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
@@ -38,12 +39,13 @@ const TILES_DIR = path.resolve(ROOT, process.env.TILES_DIR ?? 'tiles');
 const TOOLS_DIR = path.join(ROOT, '.tools');
 
 /**
- * Что собираем. Geofabrik режет Россию по федеральным округам, отдельного
+ * Что собираем. Имя — идентификатор из индекса Geofabrik (не путь: «russia/…»
+ * он не находит). Россию Geofabrik режет по федеральным округам, отдельного
  * экстракта на Краснодарский край у него нет, поэтому берётся Южный ФО и
  * обрезается рамкой края — Planetiler умеет это на входе, и в тайлы лишнее
  * просто не попадает.
  */
-const AREA = process.env.TILES_AREA ?? 'russia/south-fed-district';
+const AREA = process.env.TILES_AREA ?? 'south-fed-district';
 /** запад,юг,восток,север — Краснодарский край с небольшим запасом. */
 const BOUNDS = process.env.TILES_BOUNDS ?? '36.5,43.3,41.9,46.8';
 const OUTPUT_NAME = process.env.TILES_NAME ?? 'basemap.pmtiles';
@@ -143,12 +145,22 @@ async function buildTiles() {
     '-jar',
     PLANETILER_JAR,
     '--download',
+    // Скачанное — экстракт OSM, Natural Earth, полигоны воды — по умолчанию
+    // ложится в data/ рядом с проектом. Здесь это не рабочий каталог, а мусор в
+    // корне репозитория, поэтому всё внешнее уезжает к остальному внешнему.
+    `--download-dir=${path.join(TOOLS_DIR, 'planetiler-data')}`,
     `--area=${AREA}`,
     `--bounds=${BOUNDS}`,
     // Максимальный зум тайлов. Дальше карта дотягивает overzoom'ом — на 17,
     // куда упирается zoomForDisc, векторные тайлы z14 растягиваются без
     // видимой потери: геометрия остаётся геометрией, а не пикселями.
     '--maxzoom=14',
+    // Где живёт карта узлов — главный расход и памяти, и диска. `mmap` (по
+    // умолчанию) кладёт её во временный каталог, `ram` — в кучу JVM. На машине,
+    // где памяти много, а диска мало, второе меняет дефицитный ресурс на
+    // избыточный; на маленьком сервере всё ровно наоборот, поэтому выбор здесь,
+    // а не зашит.
+    `--nodemap-storage=${process.env.PLANETILER_STORAGE ?? 'mmap'}`,
     `--tmpdir=${work}`,
     `--output=${output}`,
     '--force',
