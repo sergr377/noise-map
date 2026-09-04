@@ -12,6 +12,7 @@
  *
  * Usage: node scripts/smoke-api.mjs [lat] [lon]
  */
+import fs from 'node:fs';
 import { request as undiciRequest } from 'undici';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:8787';
