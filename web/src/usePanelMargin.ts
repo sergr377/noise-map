@@ -1,5 +1,5 @@
 import { useEffect, useState, type RefObject } from 'react';
-import type { Margin } from '@yandex/ymaps3-types';
+import type { Margin } from './mapTypes';
 
 /**
  * Insets that tell the map which part of it the panel covers.

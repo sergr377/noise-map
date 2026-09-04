@@ -517,7 +517,10 @@ const CONTENT_TYPES: Record<string, string> = {
  * Несколько диапазонов в одном заголовке — тоже null: multipart/byteranges
  * здесь никому не нужен, PMTiles просит по одному куску за раз.
  */
-function parseRange(header: string | undefined, size: number): { start: number; end: number } | null | 'unsatisfiable' {
+function parseRange(
+  header: string | undefined,
+  size: number,
+): { start: number; end: number } | null | 'unsatisfiable' {
   if (!header) return null;
   const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
   if (!match) return null;
@@ -635,11 +638,7 @@ async function serveTiles(req: http.IncomingMessage, res: http.ServerResponse, p
  * Serves the built frontend when it exists. Unknown paths fall back to
  * index.html so that a deep link like /?lat=..&lon=.. survives a page reload.
  */
-async function serveStatic(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  pathname: string,
-) {
+async function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathname: string) {
   let file = resolveInside(WEB_DIST, pathname, 'index.html');
   if (file === false) return sendJson(res, 400, { error: 'bad path' });
   if (file === null) return sendJson(res, 403, { error: 'forbidden' });

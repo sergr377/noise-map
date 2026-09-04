@@ -465,11 +465,11 @@ if (refused.length === 0) {
 
       // %2e%2e%2f переживает нормализацию URL и дошёл бы до файловой системы
       // как ../ после декодирования.
-      const escape = await fetch(`${BASE}/tiles/%2e%2e%2f%2e%2e%2fpackage.json`);
+      const traversal = await fetch(`${BASE}/tiles/%2e%2e%2f%2e%2e%2fpackage.json`);
       check(
         'выход из каталога тайлов отклонён',
-        escape.status === 403 || escape.status === 400,
-        `HTTP ${escape.status}`,
+        traversal.status === 403 || traversal.status === 400,
+        `HTTP ${traversal.status}`,
       );
     } finally {
       fs.rmSync(`${dir}/${name}`, { force: true });

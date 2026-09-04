@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { LngLatBounds } from '@yandex/ymaps3-types';
+import type { Bounds } from './mapTypes';
 import { fetchAreas, type ComputedArea } from './api';
 
 /**
@@ -10,7 +10,7 @@ import { fetchAreas, type ComputedArea } from './api';
 const MIN_AREA_ZOOM = 11;
 
 export interface Viewport {
-  bounds: LngLatBounds;
+  bounds: Bounds;
   zoom: number;
 }
 

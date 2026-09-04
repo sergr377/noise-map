@@ -50,6 +50,17 @@ body {
   height: 100%;
 }
 
+/* MapLibre меряет контейнер сам и рисует в него канву; без явной ширины он
+   получает нулевую и молча остаётся пустым. */
+.map-canvas {
+  width: 100%;
+}
+
+/* Атрибуция обязательна по ODbL и потому не прячется, но и кричать ей незачем. */
+.maplibregl-ctrl-attrib {
+  font-size: 11px;
+}
+
 .map-placeholder {
   display: flex;
   align-items: center;
@@ -326,10 +337,11 @@ body {
   color: inherit;
 }
 
+/* Без отрицательных отступов: маркер MapLibre сам ставит точку привязки в
+   середину элемента, тогда как прежний движок клал туда левый верхний угол. */
 .centre-dot {
   width: 12px;
   height: 12px;
-  margin: -6px 0 0 -6px;
   border-radius: 50%;
   background: var(--accent);
   border: 2px solid #fff;
