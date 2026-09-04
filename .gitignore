@@ -12,6 +12,11 @@ jobs/
 # Cached results served by the API
 cache/
 
+# Собранная подложка: .pmtiles на сотни мегабайт, глифы и копия стиля. Данные,
+# а не исходник — собираются scripts/build-tiles.mjs. Сам стиль лежит в git,
+# в basemap/style.json.
+tiles/
+
 # Secrets: API keys live here, never in git. .env.example holds the template.
 .env
 .env.*
