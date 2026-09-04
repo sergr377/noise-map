@@ -6,7 +6,8 @@
  * и остаётся пустым серым полем. Своя загрузка превращает это в отклонённый
  * промис — и в тот же экран ошибки, который раньше объяснял отказ ключа.
  */
-import { addProtocol } from 'maplibre-gl';
+import { addProtocol, setWorkerUrl } from 'maplibre-gl';
+import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import { Protocol } from 'pmtiles';
 import type { MapStyle } from './mapTypes';
 import { MAP_LOAD_TIMEOUT } from './mapErrors';
@@ -24,6 +25,14 @@ export const STYLE_URL = '/tiles/style.json';
  * есть, у этого не было.
  */
 const LOAD_TIMEOUT_MS = 20_000;
+
+// Адрес воркера MapLibre вычисляет в рантайме из import.meta.url, поэтому
+// статически его не видит ни один сборщик: файл не попадает в сборку, а карта
+// на живом сервере просит /assets/maplibre-gl-worker.mjs, получает index.html и
+// падает на проверке MIME-типа. Молча — карта просто остаётся пустой. Импорт
+// через ?worker&url заставляет Vite собрать воркер (у него свой импорт общего
+// чанка) и вернуть настоящий адрес.
+setWorkerUrl(workerUrl);
 
 // Один раз на модуль: MapLibre держит протоколы глобально, и повторная
 // регистрация того же имени — ошибка, а не безобидный повтор.

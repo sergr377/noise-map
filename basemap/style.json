@@ -9,7 +9,7 @@
     "osm": {
       "type": "vector",
       "url": "pmtiles:///tiles/basemap.pmtiles",
-      "attribution": "© <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a>"
+      "attribution": "© <a href=\"https://github.com/openmaptiles/openmaptiles\">OpenMapTiles</a> © <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a>"
     }
   },
   "layers": [
