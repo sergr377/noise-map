@@ -15,6 +15,7 @@ import {
   RUN_JOB_SCRIPT,
   STAGE_LABELS,
   TERMINAL_STAGES,
+  TILES_DIR,
   WEB_DIST,
 } from './config.js';
 import { cacheKey, quantize, readCache, cacheSize, cachedAreas, coveringArea } from './cache.js';
@@ -500,29 +501,148 @@ const CONTENT_TYPES: Record<string, string> = {
   '.png': 'image/png',
   '.json': 'application/json; charset=utf-8',
   '.ico': 'image/x-icon',
+  // Подложка. .pmtiles — один большой файл, который читается кусками, см.
+  // sendFile ниже; .pbf — глифы шрифтов, их стиль запрашивает диапазонами кодов.
+  '.pmtiles': 'application/octet-stream',
+  '.pbf': 'application/x-protobuf',
+  '.webp': 'image/webp',
+  '.jpg': 'image/jpeg',
 };
+
+/**
+ * Один диапазон из заголовка Range, приведённый к абсолютным смещениям.
+ *
+ * Возвращает null, когда заголовка нет или он не разбирается: по RFC 9110
+ * непонятный Range полагается игнорировать и отдать файл целиком, а не ругаться.
+ * Несколько диапазонов в одном заголовке — тоже null: multipart/byteranges
+ * здесь никому не нужен, PMTiles просит по одному куску за раз.
+ */
+function parseRange(header: string | undefined, size: number): { start: number; end: number } | null | 'unsatisfiable' {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match) return null;
+  const [, rawStart, rawEnd] = match;
+  if (rawStart === '' && rawEnd === '') return null;
+
+  let start: number;
+  let end: number;
+  if (rawStart === '') {
+    // "bytes=-500" — последние 500 байт. PMTiles так не спрашивает, но это
+    // дешевле поддержать, чем отдавать на такой запрос весь файл.
+    const suffix = Number(rawEnd);
+    if (suffix <= 0) return 'unsatisfiable';
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(rawStart);
+    end = rawEnd === '' ? size - 1 : Number(rawEnd);
+  }
+
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  if (start >= size || start > end) return 'unsatisfiable';
+  return { start, end: Math.min(end, size - 1) };
+}
+
+/**
+ * Отдаёт файл, при необходимости куском.
+ *
+ * Range здесь не роскошь: PMTiles — это один файл на сотни мегабайт, из
+ * которого клиент читает оглавление и отдельные тайлы по смещениям. Без 206 он
+ * либо скачает весь файл на каждый тайл, либо — что и происходит на практике —
+ * не заработает вовсе.
+ */
+function sendFile(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  file: string,
+  size: number,
+  cacheControl: string,
+) {
+  const type = CONTENT_TYPES[path.extname(file).toLowerCase()] ?? 'application/octet-stream';
+  const range = parseRange(req.headers.range, size);
+
+  if (range === 'unsatisfiable') {
+    // 416 обязан назвать реальный размер — иначе клиенту нечем поправиться.
+    res.writeHead(416, { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes' });
+    return res.end();
+  }
+
+  if (range) {
+    const length = range.end - range.start + 1;
+    res.writeHead(206, {
+      'Content-Type': type,
+      'Content-Length': length,
+      'Content-Range': `bytes ${range.start}-${range.end}/${size}`,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': cacheControl,
+    });
+    return createReadStream(file, { start: range.start, end: range.end }).pipe(res);
+  }
+
+  res.writeHead(200, {
+    'Content-Type': type,
+    'Content-Length': size,
+    // Без этого браузер не станет и пробовать частичные запросы.
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': cacheControl,
+  });
+  return createReadStream(file).pipe(res);
+}
+
+/**
+ * Разбирает путь запроса в файл внутри root, или null, если он оттуда выводит.
+ *
+ * decodeURIComponent важен: %2e%2e%2f переживает нормализацию URL и дошёл бы до
+ * файловой системы как ../ после любого последующего декодирования.
+ */
+function resolveInside(root: string, pathname: string, fallback: string): string | null | false {
+  let relative: string;
+  try {
+    relative = pathname === '/' ? fallback : decodeURIComponent(pathname).replace(/^\/+/, '');
+  } catch {
+    return false;
+  }
+  const file = path.resolve(root, relative);
+  // startsWith принял бы и соседний каталог, чьё имя лишь начинается с корня;
+  // сравнение относительного пути — надёжная форма.
+  const inside = path.relative(root, file);
+  if (inside.startsWith('..') || path.isAbsolute(inside)) return null;
+  return file;
+}
+
+/**
+ * Подложка: /tiles/... из TILES_DIR.
+ *
+ * Отдельно от dist-web и **без отката на index.html**: там этот откат нужен,
+ * чтобы глубокая ссылка пережила перезагрузку страницы, а здесь он означал бы,
+ * что на месте недостающего .pmtiles клиент получит HTML с кодом 200 — и будет
+ * разбираться, почему тайлы не парсятся, вместо простого 404.
+ */
+async function serveTiles(req: http.IncomingMessage, res: http.ServerResponse, pathname: string) {
+  const file = resolveInside(TILES_DIR, pathname.replace(/^\/tiles/, ''), '');
+  if (file === false) return sendJson(res, 400, { error: 'bad path' });
+  if (file === null) return sendJson(res, 403, { error: 'forbidden' });
+
+  const info = await stat(file).catch(() => null);
+  if (!info?.isFile()) return sendJson(res, 404, { error: 'not found' });
+
+  // Тайлы и глифы неизменны в пределах одной сборки карты, а её версия входит
+  // в имя каталога — см. README, раздел про сборку тайлов.
+  return sendFile(req, res, file, info.size, 'public, max-age=604800');
+}
 
 /**
  * Serves the built frontend when it exists. Unknown paths fall back to
  * index.html so that a deep link like /?lat=..&lon=.. survives a page reload.
  */
-async function serveStatic(res: http.ServerResponse, pathname: string) {
-  // decodeURIComponent matters: %2e%2e%2f survives URL normalisation and would
-  // otherwise reach the filesystem as ../ after any later decoding.
-  let relative: string;
-  try {
-    relative = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
-  } catch {
-    return sendJson(res, 400, { error: 'bad path' });
-  }
-
-  let file = path.resolve(WEB_DIST, relative);
-  // startsWith would also accept a sibling directory whose name merely begins
-  // with the root's; comparing the relative path is the reliable form.
-  const inside = path.relative(WEB_DIST, file);
-  if (inside.startsWith('..') || path.isAbsolute(inside)) {
-    return sendJson(res, 403, { error: 'forbidden' });
-  }
+async function serveStatic(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  pathname: string,
+) {
+  let file = resolveInside(WEB_DIST, pathname, 'index.html');
+  if (file === false) return sendJson(res, 400, { error: 'bad path' });
+  if (file === null) return sendJson(res, 403, { error: 'forbidden' });
 
   let info = await stat(file).catch(() => null);
   if (!info?.isFile()) {
@@ -531,14 +651,12 @@ async function serveStatic(res: http.ServerResponse, pathname: string) {
     if (!info?.isFile()) return sendJson(res, 404, { error: 'not found' });
   }
 
-  const ext = path.extname(file).toLowerCase();
-  res.writeHead(200, {
-    'Content-Type': CONTENT_TYPES[ext] ?? 'application/octet-stream',
-    'Content-Length': info.size,
-    // Vite fingerprints asset filenames, so only the entry page must stay fresh.
-    'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
-  });
-  createReadStream(file).pipe(res);
+  // Vite fingerprints asset filenames, so only the entry page must stay fresh.
+  const cache =
+    path.extname(file).toLowerCase() === '.html'
+      ? 'no-cache'
+      : 'public, max-age=31536000, immutable';
+  return sendFile(req, res, file, info.size, cache);
 }
 
 /** One capture group: the job id, as the cache names it. */
@@ -685,8 +803,12 @@ const server = http.createServer(async (req, res) => {
       return await route.handle({ req, res, url, ip, params: match.slice(1) });
     }
 
+    if (req.method === 'GET' && url.pathname.startsWith('/tiles/')) {
+      return await serveTiles(req, res, url.pathname);
+    }
+
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
-      return await serveStatic(res, url.pathname);
+      return await serveStatic(req, res, url.pathname);
     }
 
     return sendJson(res, 404, { error: 'not found' });

@@ -58,6 +58,16 @@ export const CACHE_DIR = process.env.CACHE_DIR
 export const WEB_DIST = path.join(ROOT, 'dist-web');
 
 /**
+ * Карта-подложка: .pmtiles, стиль, глифы и спрайт. Отдельно от WEB_DIST, потому
+ * что это данные, а не сборка: файл тайлов на порядок больше всего остального в
+ * образе, поэтому в образ он не кладётся, а подключается томом — как cache/.
+ * Каталога может не быть вовсе: без него карта не откроется, но API живёт.
+ */
+export const TILES_DIR = process.env.TILES_DIR
+  ? path.resolve(ROOT, process.env.TILES_DIR)
+  : path.join(ROOT, 'tiles');
+
+/**
  * Refuse to compute on demand. A cold job needs ~1.8 GB of heap and several
  * minutes of every core; on a small host that is a denial of service waiting to
  * happen. With this set the API still serves anything already in the cache.

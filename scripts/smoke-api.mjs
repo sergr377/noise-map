@@ -398,6 +398,85 @@ if (refused.length === 0) {
   );
 }
 
+// --- подложка: частичные запросы ---------------------------------------------
+//
+// PMTiles — один файл на сотни мегабайт, из которого клиент читает оглавление и
+// отдельные тайлы по смещениям. Без 206 карта не открывается вовсе, и это не
+// та поломка, которую хочется найти на боевом сервере.
+{
+  const dir = process.env.TILES_DIR ?? 'tiles';
+  const name = 'smoke-range.bin';
+  // Содержимое произвольное, но узнаваемое: проверяется не только длина куска,
+  // но и то, что отдан именно запрошенный кусок, а не первые N байт.
+  const body = Buffer.from('0123456789abcdefghijklmnopqrstuvwxyz');
+  let made = false;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(`${dir}/${name}`, body);
+    made = true;
+  } catch (err) {
+    skip('подложка отдаётся кусками', `не удалось положить пробный файл: ${err.message}`);
+  }
+
+  if (made) {
+    try {
+      const whole = await fetch(`${BASE}/tiles/${name}`);
+      check(
+        'подложка отдаётся целиком',
+        whole.status === 200 && whole.headers.get('accept-ranges') === 'bytes',
+        `HTTP ${whole.status}, Accept-Ranges: ${whole.headers.get('accept-ranges')}`,
+      );
+
+      const part = await fetch(`${BASE}/tiles/${name}`, { headers: { Range: 'bytes=10-19' } });
+      const partText = await part.text();
+      check(
+        'Range отдаёт 206 и запрошенный кусок',
+        part.status === 206 &&
+          partText === body.subarray(10, 20).toString() &&
+          part.headers.get('content-range') === `bytes 10-19/${body.length}`,
+        `HTTP ${part.status}, Content-Range: ${part.headers.get('content-range')}, тело: ${partText}`,
+      );
+
+      const suffix = await fetch(`${BASE}/tiles/${name}`, { headers: { Range: 'bytes=-5' } });
+      const suffixText = await suffix.text();
+      check(
+        'Range с конца отдаёт хвост',
+        suffix.status === 206 && suffixText === body.subarray(-5).toString(),
+        `HTTP ${suffix.status}, тело: ${suffixText}`,
+      );
+
+      const past = await fetch(`${BASE}/tiles/${name}`, { headers: { Range: 'bytes=99999-' } });
+      check(
+        'Range за концом файла -> 416 с размером',
+        past.status === 416 && past.headers.get('content-range') === `bytes */${body.length}`,
+        `HTTP ${past.status}, Content-Range: ${past.headers.get('content-range')}`,
+      );
+
+      // Мина, ради которой раздача тайлов вынесена из serveStatic: там неизвестный
+      // путь откатывается на index.html, и недостающий .pmtiles вернулся бы в
+      // браузер как HTML с кодом 200.
+      const missing = await fetch(`${BASE}/tiles/${name}.nope`);
+      const missingType = missing.headers.get('content-type') ?? '';
+      check(
+        'недостающий тайл -> 404, а не index.html',
+        missing.status === 404 && !missingType.includes('text/html'),
+        `HTTP ${missing.status}, Content-Type: ${missingType}`,
+      );
+
+      // %2e%2e%2f переживает нормализацию URL и дошёл бы до файловой системы
+      // как ../ после декодирования.
+      const escape = await fetch(`${BASE}/tiles/%2e%2e%2f%2e%2e%2fpackage.json`);
+      check(
+        'выход из каталога тайлов отклонён',
+        escape.status === 403 || escape.status === 400,
+        `HTTP ${escape.status}`,
+      );
+    } finally {
+      fs.rmSync(`${dir}/${name}`, { force: true });
+    }
+  }
+}
+
 // --- итог -------------------------------------------------------------------
 const failed = checks.filter((c) => c.ok === false);
 const skipped = checks.filter((c) => c.skipped);
