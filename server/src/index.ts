@@ -467,14 +467,20 @@ async function sendScratchMap(req: http.IncomingMessage, res: http.ServerRespons
   return res.end(data);
 }
 
-/** GET /api/geocode?q= — address lookup, proxied so the key stays server-side. */
+/**
+ * GET /api/geocode?q= — поиск по адресу, проксированный сервером.
+ *
+ * Проксированный не ради ключа — его больше нет, — а ради двух других вещей:
+ * очередь к геокодеру общая на процесс и из браузера была бы невозможна, а
+ * адрес посетителя чужому сервису знать незачем.
+ */
 async function handleGeocode(res: http.ServerResponse, query: string, ip: string) {
   const trimmed = query.trim();
   if (trimmed.length < 3) {
     return sendJson(res, 400, { error: 'запрос слишком короткий' });
   }
-  // Metered separately from everything else: each lookup spends the Yandex
-  // quota, which runs out for the whole service and not just for this caller.
+  // Считается отдельно от всего остального: поиск занимает очередь к чужому
+  // серверу, одну на весь сервис, а не только на этого посетителя.
   const verdict = take('geocode', ip);
   if (!verdict.ok) {
     return sendTooMany(
@@ -508,6 +514,18 @@ const CONTENT_TYPES: Record<string, string> = {
   '.webp': 'image/webp',
   '.jpg': 'image/jpeg',
 };
+
+/**
+ * Слабый ETag по размеру и времени правки.
+ *
+ * Слабый — потому что и есть слабый: два разных содержимых с одинаковыми
+ * размером и mtime он не различит. Для файлов, которые появляются целиком из
+ * сборщика, этого достаточно, а честная сумма по сотням мегабайт .pmtiles
+ * считалась бы на каждый запрос диапазона.
+ */
+function etagFor(info: { size: number; mtimeMs: number }): string {
+  return `W/"${info.size.toString(16)}-${Math.round(info.mtimeMs).toString(16)}"`;
+}
 
 /**
  * Один диапазон из заголовка Range, приведённый к абсолютным смещениям.
@@ -560,8 +578,17 @@ function sendFile(
   file: string,
   size: number,
   cacheControl: string,
+  etag = '',
 ) {
   const type = CONTENT_TYPES[path.extname(file).toLowerCase()] ?? 'application/octet-stream';
+
+  // Совпал ETag — отвечаем 304 и не читаем файл вовсе. If-None-Match главнее
+  // Range: клиент спрашивает «изменилось ли», и ответ «нет» полон сам по себе.
+  if (etag && req.headers['if-none-match'] === etag) {
+    res.writeHead(304, { ETag: etag, 'Cache-Control': cacheControl });
+    return res.end();
+  }
+
   const range = parseRange(req.headers.range, size);
 
   if (range === 'unsatisfiable') {
@@ -578,6 +605,7 @@ function sendFile(
       'Content-Range': `bytes ${range.start}-${range.end}/${size}`,
       'Accept-Ranges': 'bytes',
       'Cache-Control': cacheControl,
+      ...(etag ? { ETag: etag } : {}),
     });
     return createReadStream(file, { start: range.start, end: range.end }).pipe(res);
   }
@@ -588,6 +616,7 @@ function sendFile(
     // Без этого браузер не станет и пробовать частичные запросы.
     'Accept-Ranges': 'bytes',
     'Cache-Control': cacheControl,
+    ...(etag ? { ETag: etag } : {}),
   });
   return createReadStream(file).pipe(res);
 }
@@ -629,9 +658,15 @@ async function serveTiles(req: http.IncomingMessage, res: http.ServerResponse, p
   const info = await stat(file).catch(() => null);
   if (!info?.isFile()) return sendJson(res, 404, { error: 'not found' });
 
-  // Тайлы и глифы неизменны в пределах одной сборки карты, а её версия входит
-  // в имя каталога — см. README, раздел про сборку тайлов.
-  return sendFile(req, res, file, info.size, 'public, max-age=604800');
+  // Глифы неизменны: диапазон кодов начертания — это раз и навсегда один и тот
+  // же файл. Всё остальное — стиль и .pmtiles — пересобирается на том же имени,
+  // и любой заметный max-age означал бы неделю тухлых тайлов после пересборки,
+  // причём в самом неприятном виде: .pmtiles читается диапазонами, так что
+  // клиент склеил бы куски старой сборки с кусками новой. Поэтому здесь
+  // ревалидация с ETag — 304 стоит недорого, а ошибиться не даёт.
+  const isGlyph = path.extname(file).toLowerCase() === '.pbf';
+  const cache = isGlyph ? 'public, max-age=31536000, immutable' : 'no-cache';
+  return sendFile(req, res, file, info.size, cache, etagFor(info));
 }
 
 /**

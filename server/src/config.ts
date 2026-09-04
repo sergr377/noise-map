@@ -29,11 +29,27 @@ if (proxyUrl) {
 export const PORT = Number(process.env.PORT ?? 8787);
 
 /**
- * Geocoder key. Deliberately server-side: unlike the JS API key it carries no
- * HTTP Referer restriction, so anyone could lift it out of a browser bundle and
- * spend the quota. The frontend talks to /api/geocode instead.
+ * Геокодер. Пусто — публичный инстанс Nominatim.
+ *
+ * Ключа нет и не нужно, но остаётся правило хозяев: не чаще запроса в секунду
+ * и опознаваемый User-Agent с рабочим контактом, иначе 403. Свой инстанс
+ * снимает и то и другое — тогда NOMINATIM_MIN_INTERVAL_MS можно поставить в
+ * ноль. Запрос по-прежнему идёт через сервер, а не из браузера: адрес
+ * посетителя чужому сервису знать незачем, а очередь ниже общая на процесс и
+ * из браузера была бы невозможна.
  */
-export const GEOCODER_KEY = process.env.YANDEX_GEOCODER_KEY ?? '';
+export const NOMINATIM_URL = process.env.NOMINATIM_URL ?? 'https://nominatim.openstreetmap.org';
+
+/** Чем представляемся геокодеру. Nominatim отвергает безымянных. */
+export const NOMINATIM_CONTACT =
+  process.env.NOMINATIM_CONTACT ?? 'noise-map (https://github.com/sergr377/noise-map)';
+
+/**
+ * Пауза между запросами к геокодеру, мс. Умолчание с запасом к секунде,
+ * которую просит публичный инстанс: часы клиента и сервера расходятся, а
+ * штраф за превышение — бан, а не отказ в одном запросе.
+ */
+export const NOMINATIM_MIN_INTERVAL_MS = Number(process.env.NOMINATIM_MIN_INTERVAL_MS ?? 1100);
 
 /**
  * The propagation step already saturates every core, so running two jobs at once
@@ -185,7 +201,8 @@ export const RATE_LIMIT_LOOPBACK = process.env.RATE_LIMIT_LOOPBACK === '1';
  * defence is against occupying the queue, not against reading.
  *
  * `api` is the flood guard on everything else, and `geocode` is separate because
- * it spends someone else's quota — the Yandex key — rather than our CPU.
+ * it spends someone else's patience — a public Nominatim asks for no more than a
+ * request a second — rather than our CPU.
  */
 export const RATE_LIMITS = {
   api: {
