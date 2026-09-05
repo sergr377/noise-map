@@ -481,6 +481,17 @@ boundaries, ranked by how many buildings each disc is the nearest to — and
 - **The map's panel inset is measured**, not derived from the breakpoint
   (`usePanelMargin.ts`). The panel's height depends on its content and its position
   flips between a bottom sheet and a side column.
+- **The sheet asks that question the same way.** `useBottomSheet.ts` decides
+  whether the panel is a sheet at all by measuring its width against the
+  window's, exactly as the margin hook does — the breakpoint stays in the
+  stylesheet and nowhere else. Its three heights are pixels because the collapsed
+  one is content-sized, which CSS cannot report, and because the drag is in pixels
+  anyway. During a drag the height is written straight onto the element: a move
+  arrives every frame, and re-rendering the page sixty times a second to change
+  one number is what makes a sheet feel stuck on the phones that need it most.
+  A settled sheet re-frames the result the way a window resize does, bound to the
+  end of the animation rather than to the margin — the margin also moves when
+  progress and search results grow the panel, and that must not touch the camera.
 - `margin` is applied when a location is set, not when the margin itself changes.
   That is why re-centring is bound to `resize` and **must not** be bound to the
   margin value: the panel also grows with progress and search results, and the
