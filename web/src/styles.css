@@ -348,14 +348,120 @@ body {
   box-shadow: 0 1px 4px rgb(0 0 0 / 40%);
 }
 
+/* Ручка нужна только шторке; в колонке на широком экране ей нечего делать. */
+.sheet-handle {
+  display: none;
+}
+
+/* Шторка на телефоне: три высоты вместо постоянных 55% экрана.
+   Ступени считает useBottomSheet и ставит height прямо на .panel — в пикселях,
+   потому что перетаскивание всё равно идёт в них, а «свёрнуто» — это высота
+   содержимого, которую CSS сам сообщить не может. */
 @media (max-width: 640px) {
   .panel {
     top: auto;
     bottom: 0;
     left: 0;
+    display: flex;
+    flex-direction: column;
     width: 100%;
-    max-height: 55%;
-    border-radius: 14px 14px 0 0;
+    /* До первого замера ступеней высоты нет. Прежние 55% здесь — не выбор, а
+       запасной вариант на один кадр: без него шторка мелькнула бы во весь
+       экран и села на место. */
+    height: 55%;
+    max-height: 92%;
+    /* Сверху отступ даёт ручка, снизу — вырез под домашнюю полосу iPhone. */
+    padding: 0 16px calc(16px + env(safe-area-inset-bottom, 0px));
+    border-radius: 16px 16px 0 0;
+    overflow: hidden;
+    transition: height 240ms ease;
+  }
+
+  /* Под пальцем анимации быть не должно: она отстаёт от жеста. */
+  .panel[data-dragging] {
+    transition: none;
+  }
+
+  /* Порядок на экране не совпадает с порядком в разметке. Поиск и переключатель
+     периодов видны на любой высоте, заголовок — только у раскрытой шторки,
+     остальное прокручивается под ними. */
+  .sheet-handle {
+    order: 0;
+  }
+
+  .sheet-peek {
+    order: 1;
+  }
+
+  .sheet-title {
+    order: 2;
+  }
+
+  .sheet-rest {
+    order: 3;
+  }
+
+  .sheet-handle {
+    display: block;
+    flex: none;
+    width: 100%;
+    /* Полоска тонкая, а нажимать надо по-человечески: высоту даёт padding. */
+    padding: 11px 0 9px;
+    border: 0;
+    background: transparent;
+    cursor: grab;
+    /* Иначе браузер заберёт вертикальный жест себе под прокрутку. */
+    touch-action: none;
+  }
+
+  .sheet-handle::before {
+    content: "";
+    display: block;
+    width: 36px;
+    height: 4px;
+    margin: 0 auto;
+    border-radius: 2px;
+    background: var(--line);
+  }
+
+  .sheet-handle:focus-visible {
+    border-radius: 8px;
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .sheet-peek,
+  .sheet-title {
+    flex: none;
+  }
+
+  /* Заголовок и объяснение — самое дорогое, что есть в панели по высоте, и
+     самое ненужное после первого раза. Появляются только когда места хватает. */
+  .sheet-title {
+    display: none;
+  }
+
+  .panel[data-sheet="full"] .sheet-title {
+    display: block;
+  }
+
+  /* Прокручивается только эта часть: у свёрнутой шторки ей достаётся нулевая
+     высота, у раскрытой — весь остаток. */
+  .sheet-rest {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  /* У свёрнутой шторки этой части достаётся нулевая высота — видно её всё равно
+     не будет. Скрытие убирает её ещё и из обхода по Tab: иначе фокус уезжал бы
+     на ссылки, которых нет на экране. */
+  .panel[data-sheet="collapsed"] .sheet-rest {
+    visibility: hidden;
+  }
+
+  .sheet-rest > :last-child {
+    margin-bottom: 0;
   }
 }
 

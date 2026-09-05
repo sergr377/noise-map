@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MapStyle } from './mapTypes';
 import { usePanelMargin } from './usePanelMargin';
+import { useBottomSheet } from './useBottomSheet';
 import Legend from './Legend';
 import PeriodSwitch from './PeriodSwitch';
 import ProgressPanel from './ProgressPanel';
@@ -53,6 +54,8 @@ export default function App() {
   usePeriodInUrl(period);
 
   const panelRef = useRef<HTMLDivElement>(null);
+  const peekRef = useRef<HTMLDivElement>(null);
+  const handleRef = useRef<HTMLButtonElement>(null);
   const margin = usePanelMargin(panelRef);
   // Read inside the job handlers, which are created once and must not be
   // rebuilt every time the panel changes height.
@@ -169,6 +172,29 @@ export default function App() {
     if (mapModule && deepLink) handlePick(deepLink.lat, deepLink.lon, 'link');
   }, [mapModule, deepLink, handlePick]);
 
+  // On a phone the panel is a sheet with three heights. A cache hit is
+  // deliberately not a reason to raise it: it is over before it is read, and the
+  // sheet would blink up and back for nothing.
+  const sheet = useBottomSheet(panelRef, peekRef, handleRef, {
+    raised: job.busy && !job.fromCache,
+  });
+
+  // Re-frame the result when the sheet settles at a new height. Same rule as the
+  // resize above and for the same reason — the strip the panel covers has just
+  // changed — and bound to the end of the animation rather than to the margin,
+  // which also moves as progress and results grow the panel.
+  useEffect(() => {
+    const centre = job.centre;
+    const panel = panelRef.current;
+    if (!centre || !panel) return;
+    const settled = (event: TransitionEvent) => {
+      if (event.propertyName !== 'height' || event.target !== panel) return;
+      setLocation((prev) => ({ center: [centre.lon, centre.lat], zoom: prev.zoom }));
+    };
+    panel.addEventListener('transitionend', settled);
+    return () => panel.removeEventListener('transitionend', settled);
+  }, [job.centre]);
+
   const smoothed = useSmoothProgress(job.job?.progress ?? 0, job.busy && !job.fromCache);
   const elapsed = useElapsedSeconds(job.busy && !job.fromCache, job.job?.elapsedMs);
 
@@ -228,78 +254,103 @@ export default function App() {
         )}
       </div>
 
-      <div className="panel" ref={panelRef}>
-        <h1>Карта шума</h1>
-        <p className="lead">
-          Найдите адрес или кликните по карте — рассчитаем уровень шума от автотранспорта в радиусе
-          750 м по методу CNOSSOS-EU.
-        </p>
-
-        <SearchPanel
-          query={search.query}
-          onQueryChange={search.setQuery}
-          onSubmit={search.submit}
-          searching={search.searching}
-          error={search.error}
-          places={search.places}
-          onSelect={handleSelect}
+      {/* Three regions, and on a phone the stylesheet reorders them: the handle
+          and the peek stay on screen at every sheet height, the title shows only
+          when the sheet is fully open, and the rest scrolls under them. On a wide
+          screen none of that applies and the panel is the column it always was. */}
+      <div
+        className="panel"
+        ref={panelRef}
+        data-sheet={sheet.snap ?? undefined}
+        style={sheet.height === null ? undefined : { height: `${sheet.height}px` }}
+      >
+        <button
+          type="button"
+          className="sheet-handle"
+          ref={handleRef}
+          aria-label={sheet.snap === 'collapsed' ? 'Развернуть панель' : 'Свернуть панель'}
+          aria-expanded={sheet.snap === null ? undefined : sheet.snap !== 'collapsed'}
+          {...sheet.handleProps}
         />
 
-        {areas.length > 0 && !job.busy && !job.data && (
-          <p className="note">
-            Затенённые области уже посчитаны — они открываются сразу, без ожидания.
+        <div className="sheet-title">
+          <h1>Карта шума</h1>
+          <p className="lead">
+            Найдите адрес или кликните по карте — рассчитаем уровень шума от автотранспорта в
+            радиусе 750 м по методу CNOSSOS-EU.
           </p>
-        )}
+        </div>
 
-        <PeriodSwitch period={period} onChange={setPeriod} disabled={!shown} />
-
-        {job.busy && (
-          <ProgressPanel
-            progress={smoothed}
-            label={job.job?.label ?? 'Отправляю запрос'}
-            seconds={elapsed}
-            fromCache={job.fromCache}
-            canCancel={job.runningId !== null}
-            onCancel={job.cancel}
-            previewKind={job.preview ? job.previewKind : null}
-            superseded={job.superseded}
+        <div className="sheet-peek" ref={peekRef}>
+          <SearchPanel
+            query={search.query}
+            onQueryChange={search.setQuery}
+            onSubmit={search.submit}
+            searching={search.searching}
+            error={search.error}
+            places={search.places}
+            onSelect={handleSelect}
           />
-        )}
 
-        {job.error && <p className="error">Не получилось: {job.error}</p>}
+          <PeriodSwitch period={period} onChange={setPeriod} disabled={!shown} />
+        </div>
 
-        {job.cancelled && !job.busy && (
-          <p className="note">
-            Расчёт отменён
-            {job.previewKind === 'rough' ? '; на карте осталась предварительная оценка' : ''}
-            {job.previewKind === 'frame' ? '; на карте осталось то, что успело посчитаться' : ''}.
-            Если эту же точку ждал кто-то ещё, счёт продолжается — тогда результат всё равно попадёт
-            в кэш.
+        <div className="sheet-rest">
+          {areas.length > 0 && !job.busy && !job.data && (
+            <p className="note">
+              Затенённые области уже посчитаны — они открываются сразу, без ожидания.
+            </p>
+          )}
+
+          {job.busy && (
+            <ProgressPanel
+              progress={smoothed}
+              label={job.job?.label ?? 'Отправляю запрос'}
+              seconds={elapsed}
+              fromCache={job.fromCache}
+              canCancel={job.runningId !== null}
+              onCancel={job.cancel}
+              previewKind={job.preview ? job.previewKind : null}
+              superseded={job.superseded}
+            />
+          )}
+
+          {job.error && <p className="error">Не получилось: {job.error}</p>}
+
+          {job.cancelled && !job.busy && (
+            <p className="note">
+              Расчёт отменён
+              {job.previewKind === 'rough' ? '; на карте осталась предварительная оценка' : ''}
+              {job.previewKind === 'frame' ? '; на карте осталось то, что успело посчитаться' : ''}.
+              Если эту же точку ждал кто-то ещё, счёт продолжается — тогда результат всё равно
+              попадёт в кэш.
+            </p>
+          )}
+
+          {job.data && !job.busy && (
+            <p className="note">
+              {job.fromCache ? 'Взято из кэша.' : 'Рассчитано.'} Показан период{' '}
+              {PERIODS.find((p) => p.id === period)?.label}, {visible.length} контуров.
+            </p>
+          )}
+
+          {job.covering && job.data && !job.busy && (
+            <p className="note">
+              Готовый расчёт соседнего места — ваша точка внутри него, поэтому карта открылась
+              сразу. Центр отмечен на карте: он в стороне от клика, но у края круга расчёт такой же
+              полный, как в середине.
+            </p>
+          )}
+
+          <Legend hasMap={shown !== null} presentLevels={presentLevels} />
+
+          <p className="disclaimer">
+            Расчётная оценка по типовым значениям трафика, а не результат измерений. Данные{' '}
+            <a href="https://www.openstreetmap.org/copyright">© OpenStreetMap</a>, расчёт —{' '}
+            <a href="https://github.com/Universite-Gustave-Eiffel/NoiseModelling">NoiseModelling</a>
+            .
           </p>
-        )}
-
-        {job.data && !job.busy && (
-          <p className="note">
-            {job.fromCache ? 'Взято из кэша.' : 'Рассчитано.'} Показан период{' '}
-            {PERIODS.find((p) => p.id === period)?.label}, {visible.length} контуров.
-          </p>
-        )}
-
-        {job.covering && job.data && !job.busy && (
-          <p className="note">
-            Готовый расчёт соседнего места — ваша точка внутри него, поэтому карта открылась сразу.
-            Центр отмечен на карте: он в стороне от клика, но у края круга расчёт такой же полный,
-            как в середине.
-          </p>
-        )}
-
-        <Legend hasMap={shown !== null} presentLevels={presentLevels} />
-
-        <p className="disclaimer">
-          Расчётная оценка по типовым значениям трафика, а не результат измерений. Данные{' '}
-          <a href="https://www.openstreetmap.org/copyright">© OpenStreetMap</a>, расчёт —{' '}
-          <a href="https://github.com/Universite-Gustave-Eiffel/NoiseModelling">NoiseModelling</a>.
-        </p>
+        </div>
       </div>
     </div>
   );
