@@ -1,12 +1,12 @@
 /**
- * Shared between the map bootstrap and the screen that reports its failure.
+ * Общее между загрузкой подложки и экраном, который сообщает о её отказе.
  *
- * A separate file rather than an export from ymaps.ts: that module runs a
- * top-level await, so importing anything from it statically would load the
- * Yandex API eagerly — the very thing the lazy import exists to avoid.
+ * Отдельный файл, а не экспорт из basemap.ts: тот модуль тянет за собой
+ * maplibre-gl, и статический импорт из App загрузил бы всю библиотеку сразу —
+ * ровно то, ради чего карта и вынесена в отдельный чанк.
  */
 
-/** Marks a bootstrap that ran out of time rather than being refused. */
+/** Помечает загрузку, которая не дождалась ответа, а не была отвергнута. */
 export const MAP_LOAD_TIMEOUT = 'MapLoadTimeout';
 
 export function isMapTimeout(err: unknown): boolean {

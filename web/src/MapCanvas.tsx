@@ -1,46 +1,46 @@
-import { useEffect, useMemo, useRef, type ComponentRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { GeoJSONSource, Map as MapLibreMap, Marker, type MapMouseEvent } from 'maplibre-gl';
 import polygonClipping, { type Polygon as ClipPolygon } from 'polygon-clipping';
-import type * as Ymaps from './ymaps';
+import 'maplibre-gl/dist/maplibre-gl.css';
 import { bandFor } from './palette';
 import type { Centre, ComputedArea, IsophoneCollection } from './api';
-import type { LngLat, LngLatBounds, Margin } from '@yandex/ymaps3-types';
+import type { Bounds, MapStyle, Margin } from './mapTypes';
+import type { FeatureCollection } from 'geojson';
 
 interface Props {
-  /** The bootstrapped map module. Mounted only once it has loaded, so that the
-   *  hooks below are never called conditionally. */
-  maps: typeof Ymaps;
+  /** Стиль подложки, уже загруженный — см. `basemap.ts`. */
+  style: MapStyle;
   /**
-   * Viewport. The map owns its camera between updates — this only moves it when
-   * the value itself changes, i.e. on a deep link or an address search, never on
-   * an ordinary map click.
+   * Камера. Между обновлениями карта распоряжается ею сама: эффект ниже двигает
+   * её, только когда меняется само значение, то есть по глубокой ссылке или по
+   * найденному адресу, но никогда по обычному клику.
    */
   location: { center: [number, number]; zoom: number };
   /**
-   * Part of the map covered by the panel. Passed as an ordinary prop, not
-   * through useDefault, so it follows the panel as its height changes.
+   * Часть карты, закрытая панелью. Обычный проп, а не начальное значение: он
+   * следует за высотой панели, пока та растёт.
    */
   margin: Margin;
   features: IsophoneCollection['features'];
   centre: Centre | null;
-  /** Radius a calculation covers, metres. Null until the server has said. */
+  /** Радиус, который покрывает расчёт, м. Пока сервер не сказал — null. */
   radius: number | null;
-  /** Where the cursor is, when it is over the map and nothing is running. */
+  /** Где курсор, когда он над картой и ничего не считается. */
   hover: Centre | null;
-  /** Places already computed, shaded so they can be found by looking. */
+  /** Уже посчитанные места, затенённые, чтобы их можно было найти глазами. */
   areas: ComputedArea[];
-  /** Whether a calculation is in flight — that is what turns the ring solid. */
+  /** Идёт ли расчёт — именно это делает кольцо сплошным. */
   running: boolean;
   onPick: (lat: number, lon: number) => void;
   onHover: (place: Centre | null) => void;
-  /** Reports the camera once it has come to rest, so the shading can follow. */
-  onViewport: (view: { bounds: LngLatBounds; zoom: number }) => void;
+  /** Сообщает камеру, когда она остановилась, чтобы затенение поспевало. */
+  onViewport: (view: { bounds: Bounds; zoom: number }) => void;
 }
 
 /**
- * Ring of a disc of the given radius, in the same flat approximation the server
- * uses for its own bounding boxes. The real disc is cut in a metric projection;
- * at these radii the two differ by centimetres, which is far below the width of
- * the line drawing it.
+ * Кольцо круга заданного радиуса, в том же плоском приближении, в каком сервер
+ * считает свои рамки. Настоящий круг режется в метрической проекции; на этих
+ * радиусах разница — сантиметры, много меньше толщины рисующей его линии.
  */
 function ring(lat: number, lon: number, radiusMetres: number, segments = 72): [number, number][] {
   const dLat = radiusMetres / 111320;
@@ -55,9 +55,32 @@ function ring(lat: number, lon: number, radiusMetres: number, segments = 72): [n
 
 const ACCENT = '#cd463f';
 
+const EMPTY: FeatureCollection = { type: 'FeatureCollection', features: [] };
+
+/** Одно кольцо как коллекция из одного полигона — или пустая, когда его нет. */
+function ringData(points: [number, number][] | null): FeatureCollection {
+  if (!points) return EMPTY;
+  return {
+    type: 'FeatureCollection',
+    features: [
+      { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [points] } },
+    ],
+  };
+}
+
+/** Кладёт данные в источник, если карта уже дожила до слоёв. */
+function setData(map: MapLibreMap | null, id: string, data: FeatureCollection) {
+  const source = map?.getSource(id);
+  // instanceof, а не проверка поля type: у объединения источников оно не
+  // дискриминирующее, и сужения по нему не происходит.
+  if (source instanceof GeoJSONSource) source.setData(data);
+}
+
+const toPadding = ([top, right, bottom, left]: Margin) => ({ top, right, bottom, left });
+
 export default function MapCanvas({
-  maps,
-  location: requested,
+  style,
+  location,
   margin,
   features,
   centre,
@@ -69,189 +92,237 @@ export default function MapCanvas({
   onHover,
   onViewport,
 }: Props) {
-  const {
-    reactify,
-    YMap,
-    YMapDefaultFeaturesLayer,
-    YMapDefaultSchemeLayer,
-    YMapFeature,
-    YMapListener,
-    YMapMarker,
-  } = maps;
+  const container = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<MapLibreMap | null>(null);
+  const markerRef = useRef<Marker | null>(null);
+  /** Слои появляются по событию `load`, до него источников ещё нет. */
+  const [ready, setReady] = useState(false);
 
-  // Uncontrolled between updates: passing the value as its own dependency means
-  // the camera moves when we deliberately change it, and re-renders otherwise
-  // leave the user's panning and zooming alone.
-  const location = reactify.useDefault(requested, [requested]);
+  // Обработчики подписываются один раз на всю жизнь карты, а меняются каждый
+  // рендер. Через ref — иначе переподписка на каждое движение курсора.
+  const handlers = useRef({ onPick, onHover, onViewport });
+  handlers.current = { onPick, onHover, onViewport };
+  // Отступ читается в момент постановки камеры, а не когда меняется сам, —
+  // почему это не одно и то же, сказано у эффекта камеры ниже.
+  const marginRef = useRef(margin);
+  marginRef.current = margin;
+  // Начальная камера. В зависимостях эффекта ей делать нечего: он создаёт
+  // карту, а не следует за ней.
+  const initial = useRef(location);
 
-  const handleClick = (_object: unknown, event: { coordinates: LngLat }) => {
-    const [lon, lat] = event.coordinates;
-    onPick(lat, lon);
-  };
-
-  const handleMove = (_object: unknown, event: { coordinates: LngLat }) => {
-    const [lon, lat] = event.coordinates;
-    onHover({ lat, lon });
-  };
-
-  // Only the camera at rest is reported. This event fires on every frame of a
-  // drag, and passing those upward would re-render the tree sixty times a second
-  // to answer a question whose answer only matters once the map stops.
-  const handleUpdate = ({
-    location: view,
-    mapInAction,
-  }: {
-    location: { bounds: LngLatBounds; zoom: number };
-    mapInAction: boolean;
-  }) => {
-    if (!mapInAction) onViewport({ bounds: view.bounds, zoom: view.zoom });
-  };
-
-  // The update event fires when the camera *changes*, so a map that opens and
-  // is never touched would never report where it is looking. Asking it once, on
-  // mount, is what makes the shaded areas appear before the first pan.
-  const mapRef = useRef<ComponentRef<typeof YMap>>(null);
-  // Asked once, on mount: with onViewport in the dependencies the retry loop
-  // would restart whenever the callback changed and fight the camera event.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: deliberately once
+  // Зависимость одна — стиль: смена стиля означает другую карту, всё остальное
+  // приезжает в источники и слои уже созданной.
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let tries = 0;
-    // The entity is attached a tick after mount, and its bounds stay empty until
-    // the map has been sized, so this asks again shortly rather than once and
-    // never. A timer, not requestAnimationFrame: in a background tab the frame
-    // callback may never run, and the map would then open unshaded until the
-    // first pan.
-    const ask = () => {
-      const map = mapRef.current;
-      const bounds = map?.bounds;
-      if (map && bounds && bounds[0][0] !== bounds[1][0]) {
-        onViewport({ bounds, zoom: map.zoom });
-        return;
-      }
-      if (tries < 40) {
-        tries += 1;
-        timer = setTimeout(ask, 50);
-      }
-    };
-    ask();
-    return () => clearTimeout(timer);
-    // Deliberately once: every later camera position arrives through the event
-    // above, and re-running this on each render would fight it.
-  }, []);
+    if (!container.current) return;
 
-  // Isophones are the expensive part of this tree — tens of thousands of
-  // coordinates. Holding the elements themselves means a re-render caused by
-  // the cursor moving reuses them instead of walking the geometry again.
-  const isophones = useMemo(
-    () =>
-      features.map((feature) => {
+    const map = new MapLibreMap({
+      container: container.current,
+      style,
+      center: initial.current.center,
+      zoom: initial.current.zoom,
+      // Наклон и поворот тут ничего не дают — карта плоская и читается по
+      // северу, — а сбитый север сбивает и чтение изофон.
+      dragRotate: false,
+      pitchWithRotate: false,
+      attributionControl: { compact: false },
+    });
+    map.touchZoomRotate.disableRotation();
+    mapRef.current = map;
+
+    const report = () => {
+      const box = map.getBounds();
+      handlers.current.onViewport({
+        bounds: [
+          [box.getWest(), box.getNorth()],
+          [box.getEast(), box.getSouth()],
+        ],
+        zoom: map.getZoom(),
+      });
+    };
+
+    map.on('load', () => {
+      // Порядок добавления — он же порядок отрисовки: затенение снизу, изофоны
+      // над ним, кольца поверх всего. Раньше ту же роль играл zIndex.
+      map.addSource('computed', { type: 'geojson', data: EMPTY });
+      map.addLayer({
+        id: 'computed-fill',
+        type: 'fill',
+        source: 'computed',
+        paint: { 'fill-color': ACCENT, 'fill-opacity': 0.1 },
+      });
+      map.addLayer({
+        id: 'computed-line',
+        type: 'line',
+        source: 'computed',
+        paint: { 'line-color': ACCENT, 'line-width': 1, 'line-opacity': 0.35 },
+      });
+
+      map.addSource('isophones', { type: 'geojson', data: EMPTY });
+      map.addLayer({
+        id: 'isophones-fill',
+        type: 'fill',
+        source: 'isophones',
+        // Цвет приезжает в самом объекте, а не собирается выражением по ISOLVL:
+        // палитра живёт в palette.ts, и её перевод в выражение стиля был бы
+        // второй копией той же таблицы.
+        paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.55 },
+      });
+      map.addLayer({
+        id: 'isophones-line',
+        type: 'line',
+        source: 'isophones',
+        // Тихие полосы бледны на подложке; обводка держит их границы там, где
+        // одной заливки не хватает.
+        paint: { 'line-color': ['get', 'color'], 'line-width': 1, 'line-opacity': 0.95 },
+      });
+
+      map.addSource('ring-preview', { type: 'geojson', data: EMPTY });
+      map.addLayer({
+        id: 'ring-preview-line',
+        type: 'line',
+        source: 'ring-preview',
+        paint: {
+          'line-color': ACCENT,
+          'line-width': 2,
+          'line-opacity': 0.75,
+          // line-dasharray считается в толщинах линии, а не в пикселях: при
+          // ширине 2 это те же 8 и 7 пикселей, что были у прежнего движка.
+          'line-dasharray': [4, 3.5],
+        },
+      });
+
+      map.addSource('ring-active', { type: 'geojson', data: EMPTY });
+      map.addLayer({
+        id: 'ring-active-line',
+        type: 'line',
+        source: 'ring-active',
+        paint: { 'line-color': ACCENT, 'line-width': 2, 'line-opacity': 0.9 },
+      });
+
+      setReady(true);
+      // Камера сообщает о себе по `moveend`, а карта, которую не тронули, его
+      // не дождётся. У прежнего движка ради этого крутился цикл ретраев вокруг
+      // ещё не подключённой сущности; здесь хватает одного вопроса по `load`.
+      report();
+    });
+
+    // Наверх идёт только остановившаяся камера: `move` срабатывает на каждом
+    // кадре перетаскивания, и передавать их значило бы перерисовывать дерево
+    // шестьдесят раз в секунду ради ответа, который нужен один раз.
+    map.on('moveend', report);
+    map.on('click', (e: MapMouseEvent) => handlers.current.onPick(e.lngLat.lat, e.lngLat.lng));
+    map.on('mousemove', (e: MapMouseEvent) =>
+      handlers.current.onHover({ lat: e.lngLat.lat, lon: e.lngLat.lng }),
+    );
+    map.on('mouseout', () => handlers.current.onHover(null));
+
+    return () => {
+      markerRef.current?.remove();
+      markerRef.current = null;
+      setReady(false);
+      map.remove();
+      mapRef.current = null;
+    };
+  }, [style]);
+
+  // Камера. Двигается по смене `location` и намеренно не реагирует на изменение
+  // отступа: панель растёт и сжимается по ходу расчёта, и дёргать карту на
+  // каждое такое изменение хуже, чем оставить её там, куда её поставили.
+  useEffect(() => {
+    mapRef.current?.easeTo({
+      center: location.center,
+      zoom: location.zoom,
+      padding: toPadding(marginRef.current),
+      duration: 400,
+    });
+  }, [location]);
+
+  // Изофоны. Один источник вместо объекта на полосу: цвет уезжает в свойство,
+  // порядок полос — в порядок объектов внутри коллекции.
+  useEffect(() => {
+    if (!ready) return;
+    const drawn = features
+      .map((feature) => {
         const band = bandFor(feature.properties.ISOLVL);
         if (!band) return null;
-        return (
-          <YMapFeature
-            key={`${feature.properties.PERIOD}-${feature.properties.ISOLVL}`}
-            geometry={feature.geometry}
-            style={{
-              fill: band.color,
-              fillOpacity: 0.55,
-              // Dissolved bands carry their holes as interior rings.
-              fillRule: 'evenodd',
-              // The quiet bands are pale against the basemap; an outline keeps
-              // their boundaries readable where the fill alone would wash out.
-              stroke: [{ color: band.color, width: 1, opacity: 0.95 }],
-              zIndex: band.level,
-            }}
-          />
-        );
-      }),
-    [features, YMapFeature],
-  );
+        return {
+          type: 'Feature' as const,
+          geometry: feature.geometry,
+          properties: { color: band.color, level: band.level },
+        };
+      })
+      .filter((feature) => feature !== null)
+      // Внутри слоя рисуется в порядке следования, так что сортировка по полосе
+      // и есть прежний zIndex: громкое ложится поверх тихого.
+      .sort((a, b) => a.properties.level - b.properties.level);
+    setData(mapRef.current, 'isophones', { type: 'FeatureCollection', features: drawn });
+  }, [features, ready]);
 
-  // Everything already computed, merged into one shape before it is drawn.
+  // Всё уже посчитанное, слитое в одну фигуру до отрисовки.
   //
-  // Handing the discs over as a MultiPolygon is not enough: the renderer fills
-  // each polygon separately, so overlaps stack their transparency into a darker
-  // blob and every disc keeps its own outline — a cluster of computed places then
-  // reads as a pile of circles rather than as one region. Union first, and the
-  // seams simply do not exist; holes between discs survive as interior rings,
-  // which is why the fill rule is evenodd.
+  // Отдать круги как MultiPolygon мало: заливка считается по каждому полигону
+  // отдельно, поэтому перекрытия складывают прозрачность в пятно потемнее, и у
+  // каждого круга остаётся своя обводка — скопление посчитанных мест читается
+  // тогда как куча кружков, а не как одна область. После объединения швов
+  // просто нет, а дырки между кругами остаются внутренними кольцами.
   //
-  // The merge is geometric rather than a styling trick because the styling trick
-  // does not exist here: the drawing style has no blend mode and no layer-wide
-  // opacity, so the only way to hide the seams through style is an opaque fill —
-  // which would bury the streets the shading is meant to sit over.
-  const computed = useMemo(() => {
-    if (areas.length === 0) return null;
+  // Склейка геометрическая, а не через стиль, потому что через стиль её нет: у
+  // слоя заливки нет режима наложения, а непрозрачная заливка похоронила бы
+  // улицы, ради которых затенение и сделано полупрозрачным.
+  useEffect(() => {
+    if (!ready) return;
+    if (areas.length === 0) {
+      setData(mapRef.current, 'computed', EMPTY);
+      return;
+    }
     const discs: ClipPolygon[] = areas.map((area) => [ring(area.lat, area.lon, area.radius, 64)]);
-    // union() wants the first shape and the rest as separate arguments.
     const [first, ...rest] = discs;
-    if (!first) return null;
+    if (!first) return;
+    // union() хочет первую фигуру и остальные отдельными аргументами.
     const merged = polygonClipping.union(first, ...rest);
-    return (
-      <YMapFeature
-        geometry={{ type: 'MultiPolygon', coordinates: merged as LngLat[][][] }}
-        style={{
-          fill: ACCENT,
-          fillOpacity: 0.1,
-          fillRule: 'evenodd',
-          stroke: [{ color: ACCENT, width: 1, opacity: 0.35 }],
-          zIndex: 0,
-        }}
-      />
-    );
-  }, [areas, YMapFeature]);
+    setData(mapRef.current, 'computed', {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'MultiPolygon', coordinates: merged },
+        },
+      ],
+    });
+  }, [areas, ready]);
 
-  // What a click would cover, followed under the cursor. Dashed, because it is
-  // a proposal rather than a result; it steps aside while something is running,
-  // where the solid ring below says what is actually being computed.
-  const preview = !running && hover && radius ? ring(hover.lat, hover.lon, radius) : null;
-  const active = running && centre && radius ? ring(centre.lat, centre.lon, radius) : null;
+  // Что накроет клик — следует за курсором. Пунктиром, потому что это
+  // предложение, а не результат; на время расчёта уступает место сплошному.
+  useEffect(() => {
+    if (!ready) return;
+    const points = !running && hover && radius ? ring(hover.lat, hover.lon, radius) : null;
+    setData(mapRef.current, 'ring-preview', ringData(points));
+  }, [hover, radius, running, ready]);
 
-  return (
-    <YMap location={location} margin={margin} ref={mapRef}>
-      <YMapDefaultSchemeLayer />
-      <YMapDefaultFeaturesLayer />
-      <YMapListener
-        onClick={handleClick}
-        onMouseMove={handleMove}
-        onMouseLeave={() => onHover(null)}
-        onUpdate={handleUpdate}
-      />
+  useEffect(() => {
+    if (!ready) return;
+    const points = running && centre && radius ? ring(centre.lat, centre.lon, radius) : null;
+    setData(mapRef.current, 'ring-active', ringData(points));
+  }, [centre, radius, running, ready]);
 
-      {computed}
+  // Центр расчёта. Маркер, а не слой: это кусок вёрстки со своим CSS.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    if (!centre) {
+      markerRef.current?.remove();
+      markerRef.current = null;
+      return;
+    }
+    if (!markerRef.current) {
+      const dot = document.createElement('div');
+      dot.className = 'centre-dot';
+      dot.title = 'Центр расчёта';
+      markerRef.current = new Marker({ element: dot });
+    }
+    markerRef.current.setLngLat([centre.lon, centre.lat]).addTo(map);
+  }, [centre, ready]);
 
-      {isophones}
-
-      {preview && (
-        <YMapFeature
-          geometry={{ type: 'Polygon', coordinates: [preview] }}
-          style={{
-            // Empty on purpose: what is already computed is shaded across the
-            // whole map above, so this ring says only what a click would cover.
-            fill: 'rgba(0, 0, 0, 0)',
-            stroke: [{ color: ACCENT, width: 2, opacity: 0.75, dash: [8, 7] }],
-            zIndex: 500,
-          }}
-        />
-      )}
-
-      {active && (
-        <YMapFeature
-          geometry={{ type: 'Polygon', coordinates: [active] }}
-          style={{
-            fill: 'rgba(0, 0, 0, 0)',
-            stroke: [{ color: ACCENT, width: 2, opacity: 0.9 }],
-            zIndex: 500,
-          }}
-        />
-      )}
-
-      {centre && (
-        <YMapMarker coordinates={[centre.lon, centre.lat]}>
-          <div className="centre-dot" title="Центр расчёта" />
-        </YMapMarker>
-      )}
-    </YMap>
-  );
+  return <div className="map-canvas" ref={container} />;
 }

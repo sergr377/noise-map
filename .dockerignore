@@ -4,6 +4,8 @@ server/dist
 .tools
 jobs
 cache
+# Подложка подключается томом: класть сотни мегабайт тайлов в образ незачем.
+tiles
 .git
 .env
 .env.*

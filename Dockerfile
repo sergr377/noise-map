@@ -20,12 +20,7 @@ COPY web ./web
 # здесь падает tsc (TS2307), а в рантайме сервер умирает на первом импорте.
 COPY shared ./shared
 
-# Vite вшивает ключ в бандл на этапе сборки, поэтому он нужен здесь, а не при
-# запуске. Это безопасно: ключ JS API ограничен по HTTP Referer и всё равно
-# виден в исходниках страницы. Ключ геокодера сюда не передаётся — он серверный
-# и в браузер не попадает.
-ARG VITE_YANDEX_API_KEY
-ENV VITE_YANDEX_API_KEY=$VITE_YANDEX_API_KEY
+# Ключей на этапе сборки не нужно: подложка своя, геокодер по данным OSM.
 RUN npm run build:server && npm run build:web
 
 
@@ -56,8 +51,10 @@ COPY pipeline ./pipeline
 COPY scripts ./scripts
 COPY shared ./shared
 
-# jobs/ и cache/ — рабочие каталоги; в compose под них подключён том.
-RUN mkdir -p jobs cache
+# jobs/ и cache/ — рабочие каталоги, tiles/ — подложка; в compose под них
+# подключены тома. Тайлы в образ не кладутся: .pmtiles на сотни мегабайт
+# пересобирается отдельно и живёт своей жизнью, см. scripts/build-tiles.mjs.
+RUN mkdir -p jobs cache tiles
 
 ENV NODE_ENV=production
 ENV PORT=8787

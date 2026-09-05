@@ -21,6 +21,8 @@
     "node": ">=20"
   },
   "dependencies": {
+    "maplibre-gl": "^6.7.0",
+    "pmtiles": "^4.5.0",
     "pngjs": "^7.0.0",
     "polygon-clipping": "^0.15.7",
     "react": "^19.2.8",
@@ -33,7 +35,6 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
-    "@yandex/ymaps3-types": "^1.0.20315584",
     "typescript": "^7.0.2",
     "vite": "^8.2.1"
   }

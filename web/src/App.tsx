@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type * as Ymaps from './ymaps';
-import MapCanvas from './MapCanvas';
+import type { MapStyle } from './mapTypes';
 import { usePanelMargin } from './usePanelMargin';
 import Legend from './Legend';
 import PeriodSwitch from './PeriodSwitch';
@@ -25,10 +24,19 @@ import { isMapTimeout } from './mapErrors';
  * the camera is, and the handful of rules that connect one part to another.
  */
 export default function App() {
-  // The map module is loaded lazily so that a rejected API key degrades to a
-  // readable message instead of an empty page — the bootstrap throws, and a
-  // throw during module evaluation would take the whole app down with it.
-  const [maps, setMaps] = useState<typeof Ymaps | null>(null);
+  /**
+   * Карта и её стиль, загруженные вместе.
+   *
+   * Лениво — по двум причинам сразу. Во-первых, maplibre-gl весит больше всего
+   * остального бандла, и держать его в первом чанке значит платить за карту до
+   * того, как станет ясно, откроется ли она. Во-вторых, отказ стиля должен
+   * превращаться в читаемое сообщение, а не в пустую страницу: бросок при
+   * вычислении модуля унёс бы с собой всё приложение.
+   */
+  const [mapModule, setMapModule] = useState<{
+    MapCanvas: typeof import('./MapCanvas').default;
+    style: MapStyle;
+  } | null>(null);
   const [mapError, setMapError] = useState<{ message: string; timedOut: boolean } | null>(null);
   /**
    * Radius a click covers. Asked of the server rather than kept as a constant
@@ -105,15 +113,22 @@ export default function App() {
 
   useEffect(() => {
     let dropped = false;
-    import('./ymaps')
-      .then((module) => {
-        if (!dropped) setMaps(module);
-      })
-      .catch((err: unknown) => {
+    void (async () => {
+      try {
+        // Код карты и её стиль запрашиваются разом: ждать один после другого
+        // значило бы сложить две задержки там, где они независимы.
+        const [{ default: MapCanvas }, { loadStyle }] = await Promise.all([
+          import('./MapCanvas'),
+          import('./basemap'),
+        ]);
+        const style = await loadStyle();
+        if (!dropped) setMapModule({ MapCanvas, style });
+      } catch (err) {
         if (!dropped) {
           setMapError({ message: (err as Error).message, timedOut: isMapTimeout(err) });
         }
-      });
+      }
+    })();
     return () => {
       dropped = true;
     };
@@ -151,8 +166,8 @@ export default function App() {
   // Kick off the deep-linked calculation once the map module is in place, so the
   // marker and isophones land on a map that already exists.
   useEffect(() => {
-    if (maps && deepLink) handlePick(deepLink.lat, deepLink.lon, 'link');
-  }, [maps, deepLink, handlePick]);
+    if (mapModule && deepLink) handlePick(deepLink.lat, deepLink.lon, 'link');
+  }, [mapModule, deepLink, handlePick]);
 
   const smoothed = useSmoothProgress(job.job?.progress ?? 0, job.busy && !job.fromCache);
   const elapsed = useElapsedSeconds(job.busy && !job.fromCache, job.job?.elapsedMs);
@@ -171,9 +186,9 @@ export default function App() {
       {/* The map fills the app; the panel floats over it and must be free to
           size itself to its content. */}
       <div className="map">
-        {maps ? (
-          <MapCanvas
-            maps={maps}
+        {mapModule ? (
+          <mapModule.MapCanvas
+            style={mapModule.style}
             location={location}
             margin={margin}
             features={visible}
@@ -194,16 +209,15 @@ export default function App() {
                 <p>{mapError.message}</p>
                 {mapError.timedOut ? (
                   <p className="note">
-                    Ключ и настройки тут ни при чём: ответа просто не дождались. Проверьте сеть и
+                    Настройки тут ни при чём: ответа просто не дождались. Проверьте сеть и
                     перезагрузите страницу — остальное на ней работает и без карты.
                   </p>
                 ) : (
                   <p className="note">
-                    Яндекс отвечает <code>Invalid api key</code> в двух разных случаях, не различая
-                    их: к ключу не подключён JavaScript API, либо для него не заданы обязательные
-                    ограничения по HTTP Referer или IP — без них ключ JS API 3.0 не работает.
-                    Проверьте оба пункта в кабинете разработчика; для локальной разработки в поле
-                    Referer добавляется <code>localhost</code>, без протокола и порта.
+                    Подложка своя и лежит рядом с сервисом. Чаще всего это значит, что тайлы ещё не
+                    собраны или каталог с ними не подключён к серверу — как их собрать, написано в
+                    README, раздел «Подложка». Расчёт и поиск при этом работают: карта нужна только
+                    чтобы посмотреть на результат.
                   </p>
                 )}
               </div>
