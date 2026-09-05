@@ -247,8 +247,10 @@ everything about talking to a public instance lives there.
   Two of the four defaults answer from this machine directly; `kumi.systems` and
   `private.coffee` do not, through the local proxy. From inside the Docker
   container, which has no proxy, `kumi.systems` **does** answer — 7.2 MB in 24.3 s,
-  and it served the first calculation run in Docker — so the one still
-  **unverified from anywhere here** is `private.coffee`.
+  and it served the first calculation run in Docker. `private.coffee` has now
+  timed out from a Russian datacentre as well as from here, i.e. from two
+  independent networks — **treat it as dead rather than as blocked locally**, and
+  do not spend time re-testing it from a third.
 - **Check coverage before adding a mirror.** `overpass.osm.ch` is fast and
   correct and carries only Switzerland: a Moscow query gets an empty answer
   rather than an error. Ask a candidate for a point far outside its likely
