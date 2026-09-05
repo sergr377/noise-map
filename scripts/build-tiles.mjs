@@ -24,7 +24,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
-import { mkdir, rm, stat, copyFile, readdir, rename } from 'node:fs/promises';
+import { cp, mkdir, rm, stat, copyFile, readdir, rename } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
@@ -218,7 +218,11 @@ async function buildGlyphs() {
     const from = path.join(base, face);
     if (!(await exists(from))) throw new Error(`в архиве нет начертания «${face}»`);
     await rm(path.join(glyphs, face), { recursive: true, force: true });
-    await rename(from, path.join(glyphs, face));
+    // Копирование, а не переименование: TILES_DIR и .tools — разные каталоги, и
+    // ничто не обещает, что они на одной файловой системе. На сервере это два
+    // разных бинд-монта, и rename там падает с EXDEV, хотя дома, где оба лежат
+    // на одном диске, работает.
+    await cp(from, path.join(glyphs, face), { recursive: true });
     log(`  ${face}`);
   }
 
