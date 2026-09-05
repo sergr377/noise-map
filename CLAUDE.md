@@ -531,6 +531,16 @@ glyphs and a copy of `basemap/style.json`. The server hands it out under
   The style and the tiles are `no-cache` **with an ETag**, because they are rebuilt
   under the same names, and a stale `.pmtiles` would be the worst kind of stale:
   the client reads it in ranges and would splice old bytes into a new build.
+- **Planetiler needs Java 21+, the engine does not.** The image ships JRE 17 —
+  enough for NoiseModelling, whose bytecode targets Java 11 — and Planetiler dies
+  there with `UnsupportedClassVersionError`. So **the service image cannot build
+  tiles**, and bumping its JRE for that reason alone would change the runtime the
+  acoustics engine is verified on. Build them where a JDK 21+ lives, or move the
+  finished `.pmtiles` across as a file — it is self-contained.
+- **Nothing in the tile build may assume one filesystem.** `TILES_DIR` and
+  `.tools` are two bind mounts on the server, so `rename` across them fails with
+  `EXDEV` while working fine at home where both sit on one disk. The glyph step
+  copies rather than renames for exactly this reason.
 - The tile build covers **Krasnodar Krai only**, which is why `DEFAULT_CENTER` is
   Krasnodar. Widen one and you have to widen the other, or the service opens onto
   an empty grey field.
