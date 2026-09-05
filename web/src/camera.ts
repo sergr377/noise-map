@@ -1,7 +1,14 @@
-import type { Margin } from '@yandex/ymaps3-types';
+import type { Margin } from './mapTypes';
 
-/** Where the map opens: the city, not a disc — nothing has been computed yet. */
-export const DEFAULT_CENTER: [number, number] = [37.6173, 55.7558];
+/**
+ * Where the map opens: the city, not a disc — nothing has been computed yet.
+ *
+ * Krasnodar, and that is not a preference: the basemap is our own tile build and
+ * covers Krasnodar Krai only, so opening anywhere else would show an empty grey
+ * field. Whoever widens the tile build widens this too — see the README section
+ * on the basemap.
+ */
+export const DEFAULT_CENTER: [number, number] = [38.9769, 45.0355];
 export const DEFAULT_ZOOM = 14.4;
 
 /** Web Mercator ground resolution at the equator, metres per pixel at zoom 0. */

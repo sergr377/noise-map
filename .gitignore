@@ -12,6 +12,15 @@ jobs/
 # Cached results served by the API
 cache/
 
+# Собранная подложка: .pmtiles на сотни мегабайт, глифы и копия стиля. Данные,
+# а не исходник — собираются scripts/build-tiles.mjs. Сам стиль лежит в git,
+# в basemap/style.json.
+tiles/
+
+# Источники Planetiler: экстракт OSM, Natural Earth, полигоны воды. Скрипт
+# уводит их в .tools/, но старая сборка могла оставить каталог здесь.
+data/
+
 # Secrets: API keys live here, never in git. .env.example holds the template.
 .env
 .env.*

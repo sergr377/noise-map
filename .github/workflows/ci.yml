@@ -99,8 +99,6 @@ jobs:
           kill $server 2> /dev/null || true
           exit $status
 
-      # No VITE_YANDEX_API_KEY here on purpose: the key is missing at build time
-      # and the bundle still has to come out. It fails in the browser instead,
-      # with a message that says which key to set.
+      # Никаких ключей: подложка своя, геокодер по данным OSM.
       - name: Сборка фронтенда
         run: npm run build:web

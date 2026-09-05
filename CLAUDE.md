@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Road traffic noise map: OpenStreetMap → CNOSSOS-EU → isophones on Yandex Maps.
+Road traffic noise map: OpenStreetMap → CNOSSOS-EU → isophones on MapLibre.
 [README.md](README.md) is the documentation for people. This file holds what you
 need in order to work on the code without walking into rakes already stepped on.
 
@@ -23,6 +23,11 @@ node scripts/rail-probe.mjs <lat> <lon>                # what OSM knows about tr
 node scripts/check-quantize.mjs                        # cache grid idempotence
 
 node scripts/plan-tiles.mjs krasnodar                  # city-wide tile plan (Overpass only)
+
+# the basemap: vector tiles, glyphs and the style, all into TILES_DIR
+node scripts/build-tiles.mjs                           # everything missing
+node scripts/build-tiles.mjs --skip-tiles              # glyphs and style only, fast
+node scripts/build-tiles.mjs --force                   # rebuild the tiles from scratch
 
 # needs the API running on :8787:
 node scripts/prewarm.mjs moscow                        # warm the demo cache
@@ -124,15 +129,18 @@ A cold job takes **6–27 minutes across every core and up to 2.2 GB**. Therefor
 
 ## Keys and secrets
 
-There are **two different keys** and they are not interchangeable:
+**There are no API keys any more.** The basemap is built here and served out of
+`TILES_DIR`; the address search goes to Nominatim, which wants a User-Agent and
+not a key. Nothing in the bundle is a secret, and nothing has to be set for the
+frontend to build — CI builds it with an empty environment on purpose.
 
-- `VITE_YANDEX_API_KEY` — JavaScript API, the map itself. Vite inlines it into the
-  bundle at build time; that is fine, it is restricted by HTTP Referer.
-- `YANDEX_GEOCODER_KEY` — HTTP Geocoder, address search. **Deliberately without the
-  `VITE_` prefix**: it carries no referer restriction and must never reach the
-  browser. The frontend goes through `/api/geocode`.
+Worth keeping that way. The keys that used to be here were the root of a whole
+class of failures the code no longer has to explain: a referer restriction that
+had to stay configured or the map went dark, a daily quota one visitor could
+spend in five minutes, and a licence that forbade caching the geocoder answers.
 
-Before every commit:
+The habit below outlives the keys, because `.env` still exists and the next
+secret will go into it. Before every commit:
 
 ```bash
 git grep -n --cached -e <key-fragment>
@@ -142,14 +150,13 @@ and **do not commit if it matches**. A key once reached the history along with
 `dist-web/` precisely because this check printed a warning without blocking.
 `dist-web/` is now in `.gitignore`.
 
-That key is still in the history (`d1db820`, removed in `4da2ffd`), and the
-owner's decision is to leave it: the JS API key is public by nature — every
-visitor already has it out of the bundle — and is protected by its HTTP Referer
-restriction rather than by secrecy. **So the restriction has to stay in place**;
-if it ever comes off, reissue the key. The geocoder key is not in the history at
-all, checked across every branch. Rewriting the history was considered and
-rejected: it breaks other people's clones and the old objects stay reachable by
-SHA in GitHub's cache anyway, so it would not have been a guarantee.
+The old maps key is still in the history (`d1db820`, removed in `4da2ffd`). That
+used to carry a live condition — the referer restriction had to stay in place, or
+the key was worth stealing. **It no longer does: nothing uses the key.** Revoke
+it in the Yandex console when convenient and the question closes for good.
+Rewriting the history was considered and rejected then, and is not worth doing
+now: it breaks other people's clones, and the old objects stay reachable by SHA
+in GitHub's cache anyway.
 
 ## NoiseModelling rakes
 
@@ -388,7 +395,8 @@ adding it there would invalidate the whole cache.
 ## Rate limits
 
 Token buckets per IP in `ratelimit.ts`: `job` (starting a calculation), `geocode`
-(someone else's quota) and `api` (everything else). The `job` bucket is charged
+(someone else's patience — see **Address search** below) and `api` (everything
+else). The `job` bucket is charged
 only where new work would begin — not on a cache hit, not on joining a running
 job — and `/api/health` is not charged at all.
 
@@ -407,8 +415,8 @@ Loopback is exempt from all of it so `prewarm.mjs` can run; set
 **That exemption is a trap behind a reverse proxy on the same host.** The socket
 address is then `127.0.0.1` for everyone, so without `TRUST_PROXY=1` every
 visitor is exempt from every bucket — not sharing one bucket, exempt from all of
-them — and `/api/geocode` starts spending somebody else's quota on our geocoder
-key. `X-Forwarded-For` is read only under `TRUST_PROXY=1`, and trusting it is
+them — and `/api/geocode` starts spending somebody else's patience on our behalf,
+one visitor able to hold the whole search queue. `X-Forwarded-For` is read only under `TRUST_PROXY=1`, and trusting it is
 only safe while the published port is bound to loopback, because on a directly
 reachable server the header is forged in one line. **The two settings are a
 pair; neither is correct on its own.** Measured: without `TRUST_PROXY` the
@@ -480,21 +488,100 @@ boundaries, ranked by how many buildings each disc is the nearest to — and
   from a locally ticking seconds counter, not from invented progress.
 - Inside `.app`, only the map stretches to full height. The rule `.app > *` once
   inflated the panel to the whole screen.
-- **The camera reports itself only when it moves.** `YMapListener`'s `onUpdate`
-  never fires for a map that opens and is not touched, so the first viewport comes
-  from reading `map.bounds` through a ref — and that entity is attached a tick
-  after mount, with empty bounds until it is sized. Hence the retry loop in
-  `MapCanvas`, and **hence a timer rather than `requestAnimationFrame`**: in a
-  background tab the frame callback may never run, and the map would open without
-  its shaded areas until the first pan.
-- Only the camera **at rest** is passed upward. `onUpdate` fires on every frame of
-  a drag, and forwarding those re-renders the tree sixty times a second.
+- **The camera reports itself only when it moves.** `moveend` never fires for a
+  map that opens and is not touched, so the first viewport is read inside the
+  `load` handler. The previous engine needed a retry loop around an entity that
+  attached a tick after mount; MapLibre has `load`, and the loop is gone. Do not
+  put it back.
+- Only the camera **at rest** is passed upward. `move` fires on every frame of a
+  drag, and forwarding those re-renders the tree sixty times a second — hence
+  `moveend` and nothing else.
+- **The map is driven imperatively; React only feeds it data.** Sources and layers
+  are created once in the `load` handler, and every later change is `setData` on a
+  source. Isophones are one GeoJSON source, not a component per band: the colour
+  travels in the feature's properties, so `palette.ts` stays the only colour
+  table, and **the order of features inside the collection is the draw order** —
+  that is what replaced `zIndex`, so the sort by band level is load-bearing.
+- **The camera moves on `location`, never on `margin`.** The panel grows and
+  shrinks as progress and results appear; `margin` is read from a ref when a
+  location is set. Putting it in the effect's dependencies would jerk the map.
 - Computed areas are **merged geometrically** (`polygon-clipping`) before they
   are drawn. One MultiPolygon feature is not enough: the renderer fills each
   polygon separately, so overlaps stack transparency and every disc keeps its own
-  outline. There is no styling way out — `DrawingStyle` has no blend mode and no
+  outline. There is no styling way out — a fill layer has no blend mode and no
   layer-wide opacity, and an opaque fill would bury the streets underneath.
-  Holes between discs survive the union as interior rings, hence `evenodd`.
+  Holes between discs survive the union as interior rings, which MapLibre draws as
+  holes on its own; the old engine had to be told `evenodd` for that.
+
+## The basemap is ours
+
+`scripts/build-tiles.mjs` produces `TILES_DIR`: a `.pmtiles` file, Noto Sans
+glyphs and a copy of `basemap/style.json`. The server hands it out under
+`/tiles/` — **not from `dist-web`**, and the difference matters twice over.
+
+- `serveTiles` has **no fallback to `index.html`**. In `dist-web` that fallback is
+  what lets a deep link survive a reload; here it would answer a missing
+  `.pmtiles` with HTML and a 200, and you would spend the evening asking why the
+  tiles will not parse.
+- **`Range` support is not optional.** PMTiles is one large file read by offsets;
+  without 206 the map does not open at all.
+- Glyphs are `immutable` for a year — a code range of a face is one file forever.
+  The style and the tiles are `no-cache` **with an ETag**, because they are rebuilt
+  under the same names, and a stale `.pmtiles` would be the worst kind of stale:
+  the client reads it in ranges and would splice old bytes into a new build.
+- The tile build covers **Krasnodar Krai only**, which is why `DEFAULT_CENTER` is
+  Krasnodar. Widen one and you have to widen the other, or the service opens onto
+  an empty grey field.
+- **MapLibre builds its worker URL at runtime** from `import.meta.url`, so no
+  bundler sees it statically. Left alone, the file never lands in the build, the
+  page asks for `/assets/maplibre-gl-worker.mjs`, gets `index.html` back from the
+  static fallback and dies on the MIME check — **silently**, as an empty map whose
+  only trace in the console talks about MIME types rather than about the map.
+  `basemap.ts` imports it as `?worker&url` and calls `setWorkerUrl`. Plain `?url`
+  is not enough: the worker imports the shared chunk, so it has to be *built*, not
+  copied. If the map ever goes blank after a dependency bump, look here first.
+- The tiles carry an **OpenMapTiles credit as well as OpenStreetMap** — CC-BY on
+  the schema, and Planetiler says so at the end of every build. It is in the
+  style's `attribution`; do not trim it back to OSM alone.
+
+`basemap/style.json` is a source file and lives in git; `tiles/` is a build
+product and does not. The style is deliberately its own rather than a copy of an
+off-the-shelf one: the isophones sit on top at 0.55 opacity, so the ground has to
+stay unsaturated, the roads have to stay legible through the fill, and buildings
+have to be drawn — they are the same OSM buildings the model screened with.
+
+## Address search
+
+`geocode.ts` talks to **Nominatim** — the same OSM data the model runs on, which
+is the point: an address that is not in OSM leads somewhere the calculation has
+nothing to work with.
+
+Two things guard the upstream, and they are not the same thing as the rate limit.
+The `geocode` bucket protects **us from a visitor**. The queue in `serialise()`
+protects **a stranger from us**: a public Nominatim asks for no more than one
+request a second and bans for breaking that, so calls are strictly serial with a
+1.1 s gap, process-wide rather than per address. The in-memory cache (2000
+entries, key normalised over case, spaces and commas) exists for that queue, not
+to save money — the requests are free. ODbL permits storing them; the licence we
+came from did not. A self-hosted instance lifts the queue:  `NOMINATIM_URL` plus
+`NOMINATIM_MIN_INTERVAL_MS=0`.
+
+**Known and measured: Nominatim does not hear the city in a free-form Russian**
+**query.** "Красная улица 40, Краснодар" returns Sochi, Dinskoy district,
+Novorossiysk, Primorsky and Armavir — no Krasnodar in the top five. The addresses
+are correct (the krai has many "Красная, 40"); the ranking weighs importance and
+effectively drops the city token. Before trying to fix this, know what has already
+been ruled out: word order (three phrasings, identical answers), a structured
+`city=` + `street=` query (identical answers), public Photon (no response at all),
+and a `viewbox` over the covered area (useless — every hit is already inside the
+krai). What is left is a self-hosted instance with tuned weights, or parsing the
+query into city and street ourselves. **Measure on a list of real queries**, not
+on this one example, or you will fix the example and break the rest.
+
+`shortName()` builds the label from street plus house number rather than reading
+Nominatim's `name`: for a house that field holds the bare number, and the results
+list came out as "176, 176, 176" — three identical rows for three different
+places.
 
 ## The rail branch does not work
 

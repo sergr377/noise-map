@@ -9,8 +9,6 @@ export default defineConfig({
   build: {
     outDir: '../dist-web',
     emptyOutDir: true,
-    // The Yandex Maps bootstrap uses top-level await.
-    target: 'esnext',
   },
   server: {
     // 5173 is taken by the unrelated project sitting next to this one.
@@ -18,6 +16,12 @@ export default defineConfig({
     // Same-origin in dev, so the API needs no CORS handling from the browser.
     proxy: {
       '/api': {
+        target: 'http://localhost:8787',
+        changeOrigin: true,
+      },
+      // Подложка тоже своя и лежит за тем же сервером — стиль, глифы, спрайт и
+      // .pmtiles. Без этой строки в разработке карта не открывается.
+      '/tiles': {
         target: 'http://localhost:8787',
         changeOrigin: true,
       },
