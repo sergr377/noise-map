@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <title>Изофоны вокруг точки</title>
+  <defs>
+    <clipPath id="tile"><rect width="32" height="32" rx="7"/></clipPath>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect width="32" height="32" fill="#cfe4cc"/>
+    <circle cx="13.5" cy="18" r="13" fill="#e3f2bf"/>
+    <circle cx="13.5" cy="18" r="9.5" fill="#f4c683"/>
+    <circle cx="13.5" cy="18" r="6" fill="#cd463f"/>
+    <circle cx="13.5" cy="18" r="2.6" fill="#430a4a"/>
+  </g>
+</svg>
