@@ -218,6 +218,27 @@
         "text-halo-color": "#f6f4f0",
         "text-halo-width": 1.6
       }
+    },
+    {
+      "id": "housenumber",
+      "type": "symbol",
+      "source": "osm",
+      "source-layer": "housenumber",
+      "metadata": {
+        "noise-map:note": "Номера домов лежат в тайлах только на z14 — выше их дотягивает overzoom, ниже их нет вовсе, поэтому minzoom меньше 14 бессмысленен. Взято 16: на z14 в центре Краснодара 819 номеров на тайл, это каша поверх изофон, а на z16 в кадр попадает полсотни. Слой стоит последним в массиве — MapLibre расставляет подписи в порядке слоёв, и при столкновении улица, водоём и район должны выигрывать у номера дома."
+      },
+      "minzoom": 16,
+      "layout": {
+        "text-field": ["get", "housenumber"],
+        "text-font": ["Noto Sans Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 16, 9, 18, 11],
+        "text-padding": 3
+      },
+      "paint": {
+        "text-color": "#6e6559",
+        "text-halo-color": "#f6f4f0",
+        "text-halo-width": 1.6
+      }
     }
   ]
 }
