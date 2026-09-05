@@ -395,7 +395,8 @@ adding it there would invalidate the whole cache.
 ## Rate limits
 
 Token buckets per IP in `ratelimit.ts`: `job` (starting a calculation), `geocode`
-(someone else's quota) and `api` (everything else). The `job` bucket is charged
+(someone else's patience — see **Address search** below) and `api` (everything
+else). The `job` bucket is charged
 only where new work would begin — not on a cache hit, not on joining a running
 job — and `/api/health` is not charged at all.
 
@@ -414,8 +415,8 @@ Loopback is exempt from all of it so `prewarm.mjs` can run; set
 **That exemption is a trap behind a reverse proxy on the same host.** The socket
 address is then `127.0.0.1` for everyone, so without `TRUST_PROXY=1` every
 visitor is exempt from every bucket — not sharing one bucket, exempt from all of
-them — and `/api/geocode` starts spending somebody else's quota on our geocoder
-key. `X-Forwarded-For` is read only under `TRUST_PROXY=1`, and trusting it is
+them — and `/api/geocode` starts spending somebody else's patience on our behalf,
+one visitor able to hold the whole search queue. `X-Forwarded-For` is read only under `TRUST_PROXY=1`, and trusting it is
 only safe while the published port is bound to loopback, because on a directly
 reachable server the header is forged in one line. **The two settings are a
 pair; neither is correct on its own.** Measured: without `TRUST_PROXY` the
@@ -531,12 +532,56 @@ glyphs and a copy of `basemap/style.json`. The server hands it out under
 - The tile build covers **Krasnodar Krai only**, which is why `DEFAULT_CENTER` is
   Krasnodar. Widen one and you have to widen the other, or the service opens onto
   an empty grey field.
+- **MapLibre builds its worker URL at runtime** from `import.meta.url`, so no
+  bundler sees it statically. Left alone, the file never lands in the build, the
+  page asks for `/assets/maplibre-gl-worker.mjs`, gets `index.html` back from the
+  static fallback and dies on the MIME check — **silently**, as an empty map whose
+  only trace in the console talks about MIME types rather than about the map.
+  `basemap.ts` imports it as `?worker&url` and calls `setWorkerUrl`. Plain `?url`
+  is not enough: the worker imports the shared chunk, so it has to be *built*, not
+  copied. If the map ever goes blank after a dependency bump, look here first.
+- The tiles carry an **OpenMapTiles credit as well as OpenStreetMap** — CC-BY on
+  the schema, and Planetiler says so at the end of every build. It is in the
+  style's `attribution`; do not trim it back to OSM alone.
 
 `basemap/style.json` is a source file and lives in git; `tiles/` is a build
 product and does not. The style is deliberately its own rather than a copy of an
 off-the-shelf one: the isophones sit on top at 0.55 opacity, so the ground has to
 stay unsaturated, the roads have to stay legible through the fill, and buildings
 have to be drawn — they are the same OSM buildings the model screened with.
+
+## Address search
+
+`geocode.ts` talks to **Nominatim** — the same OSM data the model runs on, which
+is the point: an address that is not in OSM leads somewhere the calculation has
+nothing to work with.
+
+Two things guard the upstream, and they are not the same thing as the rate limit.
+The `geocode` bucket protects **us from a visitor**. The queue in `serialise()`
+protects **a stranger from us**: a public Nominatim asks for no more than one
+request a second and bans for breaking that, so calls are strictly serial with a
+1.1 s gap, process-wide rather than per address. The in-memory cache (2000
+entries, key normalised over case, spaces and commas) exists for that queue, not
+to save money — the requests are free. ODbL permits storing them; the licence we
+came from did not. A self-hosted instance lifts the queue:  `NOMINATIM_URL` plus
+`NOMINATIM_MIN_INTERVAL_MS=0`.
+
+**Known and measured: Nominatim does not hear the city in a free-form Russian**
+**query.** "Красная улица 40, Краснодар" returns Sochi, Dinskoy district,
+Novorossiysk, Primorsky and Armavir — no Krasnodar in the top five. The addresses
+are correct (the krai has many "Красная, 40"); the ranking weighs importance and
+effectively drops the city token. Before trying to fix this, know what has already
+been ruled out: word order (three phrasings, identical answers), a structured
+`city=` + `street=` query (identical answers), public Photon (no response at all),
+and a `viewbox` over the covered area (useless — every hit is already inside the
+krai). What is left is a self-hosted instance with tuned weights, or parsing the
+query into city and street ourselves. **Measure on a list of real queries**, not
+on this one example, or you will fix the example and break the rest.
+
+`shortName()` builds the label from street plus house number rather than reading
+Nominatim's `name`: for a house that field holds the bare number, and the results
+list came out as "176, 176, 176" — three identical rows for three different
+places.
 
 ## The rail branch does not work
 
