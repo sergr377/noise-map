@@ -29,6 +29,9 @@ node scripts/build-tiles.mjs                           # everything missing
 node scripts/build-tiles.mjs --skip-tiles              # glyphs and style only, fast
 node scripts/build-tiles.mjs --force                   # rebuild the tiles from scratch
 
+# the .ico copy of favicon.svg, for readers that do not take an SVG icon
+node scripts/build-favicon.mjs
+
 # needs the API running on :8787:
 node scripts/prewarm.mjs moscow                        # warm the demo cache
 node scripts/prewarm.mjs --plan plans/krasnodar.json --share 0.95   # warm a whole city
