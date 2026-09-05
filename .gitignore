@@ -12,9 +12,11 @@ jobs/
 # Cached results served by the API
 cache/
 
-# Собранная подложка: .pmtiles на сотни мегабайт, глифы и копия стиля. Данные,
-# а не исходник — собираются scripts/build-tiles.mjs. Сам стиль лежит в git,
-# в basemap/style.json.
+# Собранная подложка: pmtiles-архив, глифы и копия стиля. Данные, а не
+# исходник — собираются scripts/build-tiles.mjs; сам стиль лежит в git, в
+# basemap/style.json. Вдобавок архив там на 163 МБ, а GitHub отвергает файлы
+# больше 100 МБ: коммит создастся, а push упадёт, и вынимать файл придётся уже
+# из истории. Если подложку понадобится версионировать, это работа для Git LFS.
 tiles/
 
 # Источники Planetiler: экстракт OSM, Natural Earth, полигоны воды. Скрипт
@@ -35,3 +37,4 @@ docker-compose.override.yml
 
 # Аварийные дампы Git Bash под Windows
 *.stackdump
+
