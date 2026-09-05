@@ -38,18 +38,28 @@ export const PORT = Number(process.env.PORT ?? 8787);
  * посетителя чужому сервису знать незачем, а очередь ниже общая на процесс и
  * из браузера была бы невозможна.
  */
-export const NOMINATIM_URL = process.env.NOMINATIM_URL ?? 'https://nominatim.openstreetmap.org';
+// `||`, а не `??`: compose передаёт незаданную переменную ПУСТОЙ СТРОКОЙ
+// (`NOMINATIM_URL: ${NOMINATIM_URL:-}`), а `??` подставляет умолчание только
+// вместо undefined. С `??` сервер собирал адрес из пустой базы и падал на
+// «Invalid URL» — поймано на боевом сервере, локально не воспроизводилось,
+// потому что там переменной просто нет.
+export const NOMINATIM_URL = process.env.NOMINATIM_URL || 'https://nominatim.openstreetmap.org';
 
 /** Чем представляемся геокодеру. Nominatim отвергает безымянных. */
+// Тоже `||`, и по той же причине; здесь пустая строка вдобавок означала бы
+// запрос без User-Agent, на который Nominatim отвечает 403.
 export const NOMINATIM_CONTACT =
-  process.env.NOMINATIM_CONTACT ?? 'noise-map (https://github.com/sergr377/noise-map)';
+  process.env.NOMINATIM_CONTACT || 'noise-map (https://github.com/sergr377/noise-map)';
 
 /**
  * Пауза между запросами к геокодеру, мс. Умолчание с запасом к секунде,
  * которую просит публичный инстанс: часы клиента и сервера расходятся, а
  * штраф за превышение — бан, а не отказ в одном запросе.
  */
-export const NOMINATIM_MIN_INTERVAL_MS = Number(process.env.NOMINATIM_MIN_INTERVAL_MS ?? 1100);
+// И здесь: Number('') это 0, то есть пустая переменная сняла бы паузу между
+// запросами вместо того, чтобы оставить её по умолчанию, — и нас забанили бы
+// на публичном инстансе. Ноль остаётся допустимым, если задан явно.
+export const NOMINATIM_MIN_INTERVAL_MS = Number(process.env.NOMINATIM_MIN_INTERVAL_MS || 1100);
 
 /**
  * The propagation step already saturates every core, so running two jobs at once

@@ -50,6 +50,11 @@ COPY --from=build /app/dist-web ./dist-web
 COPY pipeline ./pipeline
 COPY scripts ./scripts
 COPY shared ./shared
+# Исходник стиля подложки. Сервису он не нужен — тот раздаёт копию из TILES_DIR,
+# — но scripts/ здесь уже лежат, и без basemap/ шаг `build-tiles.mjs --skip-tiles`
+# падает на копировании стиля. Семь килобайт за то, чтобы глифы и стиль можно
+# было собрать этим же образом прямо на сервере.
+COPY basemap ./basemap
 
 # jobs/ и cache/ — рабочие каталоги, tiles/ — подложка; в compose под них
 # подключены тома. Тайлы в образ не кладутся: .pmtiles на сотни мегабайт
