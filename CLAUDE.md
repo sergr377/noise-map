@@ -609,6 +609,102 @@ Nominatim's `name`: for a house that field holds the bare number, and the result
 list came out as "176, 176, 176" — three identical rows for three different
 places.
 
+## Deploying an update
+
+The demo is `noisemap.online`: one container on a VDS at `/opt/noise-map`, Caddy
+in front, `CACHE_ONLY=1`. The operator reaches it over SSH; the host and key live
+in that machine's `~/.ssh/config` under the alias `noisemap` and deliberately not
+in this repo. The README covers how the server was stood up in the first place —
+DNS, certificate, hardware. This is the other thing: how to ship a change to it.
+
+### The ordinary case, code only
+
+```bash
+ssh noisemap
+cd /opt/noise-map
+git pull --ff-only
+docker compose build      # the old container keeps serving while this runs
+docker compose up -d
+```
+
+About 10 s with warm layers, 41 s cold. Then verify from **outside**, not from
+the box — the point is to exercise Caddy and the real certificate too:
+
+```bash
+curl -sf -o /dev/null -w "%{http_code}\n" https://noisemap.online/
+curl -s "https://noisemap.online/api/noise?lat=45.0359&lon=38.9560"   # cached:true
+curl -sf -o /dev/null -w "%{http_code}\n" https://noisemap.online/tiles/style.json
+curl -s -o /dev/null -w "%{http_code}\n" -H "Range: bytes=0-16383" \
+  https://noisemap.online/tiles/basemap.pmtiles                      # 206, not 200
+```
+
+A browser check is worth doing on top, but **give it time**: the first screenshot
+after load routinely catches a blank map, because the panel renders long before
+the tiles do. Blank on the first frame is not a failure; blank after ten seconds
+is.
+
+### When the basemap changes
+
+**Tiles first, container second.** The other order puts the new frontend in front
+of visitors with no basemap to draw.
+
+**Tiles are not built on the server.** Planetiler needs Java 21, the image ships
+JRE 17 for NoiseModelling, and bookworm offers nothing newer — see the basemap
+section above for why raising it is not worth it. A finished `.pmtiles` is
+self-contained, so it travels as a file, the same way the cache does:
+
+```bash
+# from a machine with a JDK 21+, after node scripts/build-tiles.mjs
+scp tiles/basemap.pmtiles noisemap:/opt/noise-map/tiles/
+ssh noisemap sha256sum /opt/noise-map/tiles/basemap.pmtiles   # compare with local
+```
+
+Reckon on about two minutes for 163 MB from a home line. Glyphs and the style do
+not need Java and **can** be built on the server, with a throwaway container off
+the image you just built:
+
+```bash
+docker run --rm \
+  -v /opt/noise-map/tiles:/app/tiles \
+  -v /opt/noise-map/.tiles-build:/app/.tools \
+  noise-map-noise-map:latest \
+  node scripts/build-tiles.mjs --skip-tiles
+rm -rf /opt/noise-map/.tiles-build   # 59 MB of archive, nothing needs it after
+```
+
+Tiles outlive the image: reverting code does not disturb them, and rebuilding
+them does not require a redeploy. `tiles/` is about 224 MB and is mounted `:ro`.
+
+### What CI cannot tell you
+
+The workflow runs the server straight from `node`. **It never builds the compose
+stack and never runs the runtime image**, so an entire class of defect reaches
+production with a green tick. Three landed in one afternoon, and they rhyme:
+
+- **Compose passes unset variables as the empty string.** `NOMINATIM_URL:
+  ${NOMINATIM_URL:-}` arrives as `""`, and `??` only substitutes for `undefined`,
+  so the default never applied and address search answered `Invalid URL`. Use
+  `||` for anything where empty means "not set" — and note the near miss:
+  `Number('')` is `0`, which would have removed the pause between geocoder calls
+  instead of defaulting it, and earned a ban.
+- **`rename` across bind mounts fails with `EXDEV`.** `TILES_DIR` and `.tools` are
+  separate mounts on the server and one directory at home. Copy, do not rename.
+- **The runtime stage copies a named list of directories.** A new top-level
+  directory the scripts read — `basemap/` was the one — simply is not there, and
+  only a run inside the image says so.
+
+So when a change touches `docker-compose.yml`, the `Dockerfile`, or anything that
+reads an environment variable, **exercise it in the image before shipping**, and
+expect the failure to look nothing like it looks locally.
+
+### Host-specific, and not in git
+
+`docker-compose.override.yml` (port bound to loopback, `TRUST_PROXY`,
+`CACHE_ONLY`) and `.env` belong to the machine, not to the project; working
+copies are kept as samples in `deploy/`. The demo answers only what is already in
+the cache, so **a deploy cannot validate the engine** — the acoustics are not
+exercised there at all.
+
 ## The rail branch does not work
 
 `--rail` is off by default and is not exposed through the server. Track extraction
