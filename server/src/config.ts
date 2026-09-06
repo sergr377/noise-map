@@ -94,6 +94,23 @@ export const TILES_DIR = process.env.TILES_DIR
   : path.join(ROOT, 'tiles');
 
 /**
+ * The baked noise layer: `<period>/<z>/<x>/<y>.pbf` plus a `meta.json`, written
+ * by `scripts/build-noise-tiles.mjs`.
+ *
+ * Separate from TILES_DIR even though it defaults inside it, because the two
+ * are built from different things and age differently: the basemap comes from
+ * an OSM extract and changes when the region does, this comes from CACHE_DIR
+ * and changes whenever a calculation finishes. An operator who mounts the
+ * basemap read-only will want this one somewhere else.
+ *
+ * Missing is a normal state — nothing has been baked yet — and the map then
+ * works exactly as it did before the layer existed.
+ */
+export const NOISE_TILES_DIR = process.env.NOISE_TILES_DIR
+  ? path.resolve(ROOT, process.env.NOISE_TILES_DIR)
+  : path.join(TILES_DIR, 'noise');
+
+/**
  * Refuse to compute on demand. A cold job needs ~1.8 GB of heap and several
  * minutes of every core; on a small host that is a denial of service waiting to
  * happen. With this set the API still serves anything already in the cache.

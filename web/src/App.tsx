@@ -11,8 +11,24 @@ import { useElapsedSeconds, useSmoothProgress } from './progress';
 import { useAddressSearch } from './useAddressSearch';
 import { useComputedAreas, type Viewport } from './useComputedAreas';
 import { useNoiseJob } from './useNoiseJob';
-import { PERIODS, readLocationFromUrl, readPeriodFromUrl, usePeriodInUrl } from './urlState';
-import { fetchConfig, type Centre, type Period, type Place } from './api';
+import {
+  PERIODS,
+  readLocationFromUrl,
+  readPeriodFromUrl,
+  usePeriodInUrl,
+  writeLocationToUrl,
+} from './urlState';
+import {
+  fetchConfig,
+  fetchNoiseTiles,
+  type Centre,
+  type NoiseTiles,
+  type Period,
+  type Place,
+} from './api';
+import type { Reading } from './MapCanvas';
+import type { PickSource } from './useNoiseJob';
+import { bandFor } from './palette';
 import { isMapTimeout } from './mapErrors';
 
 /**
@@ -47,6 +63,26 @@ export default function App() {
   const [radius, setRadius] = useState<number | null>(null);
   /** Where the cursor is over the map, for the ring that previews a click. */
   const [hover, setHover] = useState<Centre | null>(null);
+  /**
+   * Испечённый слой, если он собран. Пока (или если) его нет — карта работает
+   * ровно как раньше: клик считает, результат рисуется поверх подложки.
+   */
+  const [noiseTiles, setNoiseTiles] = useState<NoiseTiles | null>(null);
+  /**
+   * Ответ слоя на последний вопрос: сколько здесь децибел. Взаимоисключающ с
+   * результатом расчёта — там, где слой отвечает, считать нечего.
+   */
+  const [reading, setReading] = useState<Reading | null>(null);
+  /** Точка, которую надо спросить у слоя: адрес или глубокая ссылка. */
+  const [probe, setProbe] = useState<Centre | null>(null);
+  // Откуда пришёл вопрос — камера кадрирует адрес и ссылку иначе, чем клик.
+  const probeSource = useRef<PickSource>('search');
+  /**
+   * Спрашиваем ли ту же точку заново после смены периода. Тогда молчание слоя
+   * значит «в эту секунду нечего показать», а не «здесь никто не считал», и
+   * запускать расчёт по такому поводу нельзя: человек всего лишь нажал кнопку.
+   */
+  const probeIsReread = useRef(false);
   /** The camera, as the map last reported it. Null until the map has drawn. */
   const [view, setView] = useState<Viewport | null>(null);
 
@@ -95,11 +131,42 @@ export default function App() {
    * there contradicting the map.
    */
   const handlePick = useCallback(
-    (lat: number, lon: number, source: 'map' | 'search' | 'link' = 'map') => {
+    (lat: number, lon: number, source: PickSource = 'map') => {
       if (source === 'map') search.clear();
+      // Расчёт и считывание — два разных ответа на один вопрос, и показывать
+      // их разом значило бы показывать одно место дважды.
+      setReading(null);
       void pick(lat, lon, source);
     },
     [pick, search.clear],
+  );
+
+  /**
+   * Спросить слой про точку, до того как заказывать расчёт.
+   *
+   * Ответить может только карта — queryRenderedFeatures смотрит на
+   * нарисованное, — поэтому вопрос уезжает вниз, а ответ приходит в
+   * handleProbeAnswer. По клику этот круг не нужен: там карта спрашивает себя
+   * сама, в обработчике клика.
+   */
+  const askLayer = useCallback((lat: number, lon: number, source: PickSource, reread = false) => {
+    probeSource.current = source;
+    probeIsReread.current = reread;
+    setProbe({ lat, lon });
+  }, []);
+
+  const handleProbeAnswer = useCallback(
+    (centre: Centre, level: number | null) => {
+      setProbe(null);
+      if (level === null) {
+        if (probeIsReread.current) return setReading(null);
+        handlePick(centre.lat, centre.lon, probeSource.current);
+        return;
+      }
+      setReading({ ...centre, level });
+      writeLocationToUrl(centre.lat, centre.lon);
+    },
+    [handlePick],
   );
 
   const handleSelect = useCallback(
@@ -109,9 +176,9 @@ export default function App() {
       // the zoom waits for the radius the server sends back a moment later.
       // Doing both here and then refitting would be two camera jumps in a row.
       setLocation((prev) => ({ center: [place.lon, place.lat], zoom: prev.zoom }));
-      handlePick(place.lat, place.lon, 'search');
+      askLayer(place.lat, place.lon, 'search');
     },
-    [handlePick, search.accept],
+    [askLayer, search.accept],
   );
 
   useEffect(() => {
@@ -132,6 +199,18 @@ export default function App() {
         }
       }
     })();
+    return () => {
+      dropped = true;
+    };
+  }, []);
+
+  // Есть ли испечённый слой. Ответ «нет» — рабочий: тогда всё ведёт себя как до
+  // его появления, поэтому запрос молчаливый.
+  useEffect(() => {
+    let dropped = false;
+    void fetchNoiseTiles().then((meta) => {
+      if (!dropped) setNoiseTiles(meta);
+    });
     return () => {
       dropped = true;
     };
@@ -169,8 +248,19 @@ export default function App() {
   // Kick off the deep-linked calculation once the map module is in place, so the
   // marker and isophones land on a map that already exists.
   useEffect(() => {
-    if (mapModule && deepLink) handlePick(deepLink.lat, deepLink.lon, 'link');
-  }, [mapModule, deepLink, handlePick]);
+    if (mapModule && deepLink) askLayer(deepLink.lat, deepLink.lon, 'link');
+  }, [mapModule, deepLink, askLayer]);
+
+  // Уровень зависит от периода, а показанное считывание — нет: после
+  // переключения подпись говорила бы про ночь, а число осталось бы от Lden.
+  // Спрашиваем ту же точку заново; probe сам дождётся новых тайлов.
+  const readingRef = useRef(reading);
+  readingRef.current = reading;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-asking on the period is the point
+  useEffect(() => {
+    const shown = readingRef.current;
+    if (shown) askLayer(shown.lat, shown.lon, 'map', true);
+  }, [period, askLayer]);
 
   // On a phone the panel is a sheet with three heights. A cache hit is
   // deliberately not a reason to raise it: it is over before it is read, and the
@@ -199,7 +289,14 @@ export default function App() {
   const elapsed = useElapsedSeconds(job.busy && !job.fromCache, job.job?.elapsedMs);
 
   // The finished map wins; until it exists, the newest frame stands in for it.
-  const shown = job.data ?? job.preview;
+  //
+  // Ничего из этого не рисуется поверх испечённого слоя. Считывание означает,
+  // что слой это место уже показывает; ответ из кэша — что показывает и его,
+  // потому что пирамида печётся из того же кэша. Две полупрозрачные заливки
+  // одного места дали бы круг темнее фона — ровно то пятно, от которого слой и
+  // избавляет. Свежий расчёт рисуется: в пирамиде его ещё нет.
+  const coveredByLayer = noiseTiles !== null && (reading !== null || job.fromCache);
+  const shown = coveredByLayer ? null : (job.data ?? job.preview);
   const visible = useMemo(
     () => (shown?.features ?? []).filter((f) => f.properties.PERIOD === period),
     [shown, period],
@@ -222,9 +319,15 @@ export default function App() {
             radius={radius}
             hover={hover}
             areas={areas}
+            noiseTiles={noiseTiles}
+            period={period}
             running={job.busy && !job.fromCache}
             onPick={handlePick}
             onHover={setHover}
+            onRead={setReading}
+            probe={probe}
+            onProbe={handleProbeAnswer}
+            reading={reading}
             onViewport={setView}
           />
         ) : (
@@ -292,11 +395,35 @@ export default function App() {
             onSelect={handleSelect}
           />
 
-          <PeriodSwitch period={period} onChange={setPeriod} disabled={!shown} />
+          {/* Слой сам по себе карта: пока он есть, период переключается всегда,
+              а не только когда на экране лежит результат расчёта. */}
+          <PeriodSwitch period={period} onChange={setPeriod} disabled={!shown && !noiseTiles} />
         </div>
 
         <div className="sheet-rest">
-          {areas.length > 0 && !job.busy && !job.data && (
+          {reading && (
+            <p className="reading">
+              Здесь <strong>{bandFor(reading.level)?.label ?? '—'} дБ</strong>, период{' '}
+              {PERIODS.find((p) => p.id === period)?.label}. Значение взято с готовой карты —
+              считать ничего не пришлось.
+            </p>
+          )}
+
+          {noiseTiles && !reading && job.data && job.fromCache && !job.busy && (
+            <p className="note">
+              В этой самой точке уровня нет: приёмники не ставятся внутри зданий, и расчётная сетка
+              оставляет разрывы. Вокруг карта закрашена — кликните рядом.
+            </p>
+          )}
+
+          {noiseTiles && !reading && !job.busy && !job.data && (
+            <p className="note">
+              Шум показан прямо на карте, где он уже посчитан. Кликните по любому такому месту,
+              чтобы узнать уровень; клик за краем закрашенного запустит расчёт.
+            </p>
+          )}
+
+          {!noiseTiles && areas.length > 0 && !job.busy && !job.data && (
             <p className="note">
               Затенённые области уже посчитаны — они открываются сразу, без ожидания.
             </p>
@@ -327,14 +454,16 @@ export default function App() {
             </p>
           )}
 
-          {job.data && !job.busy && (
+          {job.data && !job.busy && !coveredByLayer && (
             <p className="note">
               {job.fromCache ? 'Взято из кэша.' : 'Рассчитано.'} Показан период{' '}
               {PERIODS.find((p) => p.id === period)?.label}, {visible.length} контуров.
             </p>
           )}
 
-          {job.covering && job.data && !job.busy && (
+          {/* Обе подписи ниже объясняют показанный круг. Когда его не показывают —
+              место рисует слой — объяснять нечего. */}
+          {job.covering && job.data && !job.busy && !coveredByLayer && (
             <p className="note">
               Готовый расчёт соседнего места — ваша точка внутри него, поэтому карта открылась
               сразу. Центр отмечен на карте: он в стороне от клика, но у края круга расчёт такой же
@@ -342,7 +471,7 @@ export default function App() {
             </p>
           )}
 
-          <Legend hasMap={shown !== null} presentLevels={presentLevels} />
+          <Legend hasMap={shown !== null || noiseTiles !== null} presentLevels={presentLevels} />
 
           <p className="disclaimer">
             Расчётная оценка по типовым значениям трафика, а не результат измерений. Данные{' '}

@@ -116,6 +116,34 @@ export async function geocode(query: string): Promise<Place[]> {
   return places;
 }
 
+/** What the baked noise layer covers. Null when nothing has been baked. */
+export interface NoiseTiles {
+  /** Build stamp. Travels in the tile URL so a rebuild invalidates every tile. */
+  built: number;
+  minzoom: number;
+  maxzoom: number;
+  /** minLon, minLat, maxLon, maxLat. */
+  bounds: [number, number, number, number];
+  periods: Period[];
+  radius: number;
+}
+
+/**
+ * The baked layer's extent, or null if there is none.
+ *
+ * A 404 is a normal answer — nothing has been baked yet — and the map then
+ * behaves exactly as it did before the layer existed, so this never throws.
+ */
+export async function fetchNoiseTiles(): Promise<NoiseTiles | null> {
+  try {
+    const res = await fetch('/api/noise/tiles/meta.json');
+    if (!res.ok) return null;
+    return (await res.json()) as NoiseTiles;
+  } catch {
+    return null;
+  }
+}
+
 /** A place that is already computed: a disc the map shades as ready. */
 export interface ComputedArea {
   id: string;
