@@ -97,6 +97,169 @@ String sqlLiteral(Object value, String name) {
 }
 
 /**
+ * The third-octave centres Railway_Emission_from_Traffic writes, grouped by
+ * octave. Exactly three per octave, so the energetic sum of a triple is the
+ * octave band itself rather than an approximation of it.
+ */
+Map<Integer, List<Integer>> railOctaves() {
+    return [
+            63  : [50, 63, 80],
+            125 : [100, 125, 160],
+            250 : [200, 250, 315],
+            500 : [400, 500, 630],
+            1000: [800, 1000, 1250],
+            2000: [1600, 2000, 2500],
+            4000: [3150, 4000, 5000],
+            8000: [6300, 8000, 10000],
+    ]
+}
+
+/**
+ * Railway emission: RAIL_SECTIONS + RAIL_TRAFFIC -> LW_RAILWAY.
+ *
+ * A step of its own because of the sentinel. `RailWayLWIterator` reads sections
+ * with a look-ahead: a record accumulates while the query keeps returning the
+ * same key, and is emitted when the next key turns up. When the rows run out
+ * there is no next key — and **the last section of the table silently never
+ * reaches LW_RAILWAY**. Measured on the synthetic scene: 30 sections in, 29 out,
+ * with IDSECTION 30 the one lost; a table of exactly one section is unaffected,
+ * because that case takes the other branch of the same method.
+ *
+ * So a duplicate of the last section is appended: it gets eaten instead, and
+ * the real one comes through. The duplicate is deleted right after emission, so
+ * if the engine is ever fixed the only waste is having computed it.
+ */
+void railEmission(Connection connection, Sql sql, Logger logger) {
+    def sections = sql.firstRow('SELECT COUNT(*) AS n FROM RAIL_SECTIONS').n
+    def lastSection = sql.firstRow('SELECT MAX(IDSECTION) AS n FROM RAIL_SECTIONS').n as Integer
+    int sentinel = lastSection + 1
+    sql.execute("""INSERT INTO RAIL_SECTIONS
+                   SELECT ${sentinel}, THE_GEOM, NTRACK, TRACKSPD, TRANSFER, ROUGHNESS,
+                          IMPACT, CURVATURE, BRIDGE, ISTUNNEL
+                   FROM RAIL_SECTIONS WHERE IDSECTION = ${lastSection}""" as String)
+    sql.execute("""INSERT INTO RAIL_TRAFFIC
+                   SELECT ${sentinel}, ${sentinel}, TRAINTYPE, TRAINSPD, TDAY, TEVENING, TNIGHT
+                   FROM RAIL_TRAFFIC WHERE IDTRAFFIC = ${lastSection}""" as String)
+
+    new Railway_Emission_from_Traffic().exec(connection, [
+            tableRailwayTraffic: 'RAIL_TRAFFIC',
+            tableRailwayTrack  : 'RAIL_SECTIONS'
+    ])
+
+    sql.execute("DELETE FROM LW_RAILWAY WHERE PK_SECTION = ${sentinel}" as String)
+    sql.execute("DELETE FROM RAIL_SECTIONS WHERE IDSECTION = ${sentinel}" as String)
+    sql.execute("DELETE FROM RAIL_TRAFFIC WHERE IDTRAFFIC = ${sentinel}" as String)
+
+    def emitted = sql.firstRow('SELECT COUNT(DISTINCT PK_SECTION) AS n FROM LW_RAILWAY').n
+    if (emitted != sections) {
+        logger.warn('[RAIL] emission covered {} sections out of {}', emitted, sections)
+    }
+}
+
+/**
+ * ROAD_LEVEL + RAIL_LEVEL -> RECEIVERS_LEVEL, energetically band by band.
+ *
+ * Road is the base: it covers every receiver, while a receiver out of range of
+ * any track has no rail row at all, hence the LEFT JOIN and the -99 fill.
+ *
+ * Summing column by column is only meaningful because both passes run in the
+ * same eight octaves. While the rail pass ran in third octaves, its HZ63 meant
+ * the 63 Hz third-octave and the road's meant the octave: the same name, a
+ * different quantity, and the sum came out quietly wrong. Collapsing to octaves
+ * in buildRailSources closes that too, and the two must not drift apart again.
+ */
+void combineRoadRail(Sql sql) {
+    def bands = ['HZ63', 'HZ125', 'HZ250', 'HZ500', 'HZ1000', 'HZ2000', 'HZ4000', 'HZ8000', 'LAEQ', 'LEQ']
+    def sums = bands.collect { band ->
+        String col = sqlName(band, 'полоса')
+        "10 * LOG10(POWER(10, r.${col} / 10) + POWER(10, COALESCE(t.${col}, -99) / 10)) AS ${col}"
+    }.join(',\n               ')
+
+    sql.execute('DROP TABLE IF EXISTS RECEIVERS_LEVEL')
+    sql.execute("""
+        CREATE TABLE RECEIVERS_LEVEL AS
+        SELECT r.IDRECEIVER, r.PERIOD, r.THE_GEOM,
+               ${sums}
+        FROM ROAD_LEVEL r
+        LEFT JOIN RAIL_LEVEL t
+          ON r.IDRECEIVER = t.IDRECEIVER AND r.PERIOD = t.PERIOD
+    """ as String)
+}
+
+/**
+ * Railway sources in the shape worth handing to the propagation.
+ *
+ * Railway_Emission_from_Traffic writes LW_RAILWAY both taller and wider than the
+ * calculation needs, and both cost time:
+ *
+ *  - **six rows per track.** Every section gets all six CNOSSOS source types —
+ *    rolling, two traction, two aerodynamic, bridge — whether or not this train
+ *    on this track emits anything of the kind. A suburban EMU at 100 km/h gives
+ *    rolling 73 dB, traction 30 dB below that, and exactly nothing aerodynamic
+ *    (-137 dB, i.e. the fill value), with no bridge under it. Four rows out of
+ *    six are a full share of the propagation for a contribution that is not
+ *    there;
+ *  - **third-octaves instead of octaves.** 24 bands per period against the road
+ *    pass's eight.
+ *
+ * Both go here: a row more than `floorDb` below the loudest row of its own
+ * section is dropped — it could move that section's total by 0.0004 dB at the
+ * very most — and the third-octaves are summed energetically into octaves.
+ *
+ * Measured with pipeline/rail_bench.groovy (4200 receivers, maxSrcDist 350).
+ * One double track, 12 emission rows: 18.4 s as it stands -> 8.7 s once the
+ * empty rows go (difference **exactly zero**) -> 5.4 s once the bands collapse
+ * (0.034 dB mean, 0.060 dB worst). A station throat, 30 lines and 180 rows:
+ * 1702.4 s -> 298.7 s (again exactly zero) -> 269.6 s (0.029 dB mean, 0.053 dB
+ * worst). The road pass over the same geometry costs 4.5 s, so the rail pass
+ * stops being the expensive one and starts scaling like the road one. The
+ * saving grows with the scene because the cost is superlinear in row count:
+ * 3.4x on the double track, 6.3x on the throat.
+ *
+ * Directivity is kept. It is nearly free — without it the pass is *slower*
+ * (25.0 s against 18.4 s on the double track), because levels are higher and
+ * more rays survive to a receiver — and switching it off is wrong by 1.5 dB on
+ * average and 20 dB right next to the track. That is why DIR_ID is carried
+ * through untouched.
+ */
+String buildRailSources(Sql sql, Logger logger, double floorDb) {
+    def octaves = railOctaves()
+    def thirds = octaves.values().flatten()
+    // The loudest band of a row across all three periods.
+    String rowMax = 'GREATEST(' +
+            ['D', 'E', 'N'].collectMany { p -> thirds.collect { "HZ${p}${it}" } }.join(', ') + ')'
+    def octCols = []
+    for (String period : ['D', 'E', 'N']) {
+        octaves.each { octave, group ->
+            octCols << ('10 * LOG10(' +
+                    group.collect { "POWER(10, HZ${period}${it} / 10)" }.join(' + ') +
+                    ") AS HZ${period}${octave}")
+        }
+    }
+
+    sql.execute('DROP TABLE IF EXISTS LW_RAILWAY_OCT')
+    sql.execute("""
+        CREATE TABLE LW_RAILWAY_OCT AS
+        SELECT CAST(ROW_NUMBER() OVER () AS INTEGER) AS PK, PK_SECTION, THE_GEOM, DIR_ID, GS,
+               ${octCols.join(',\n               ')}
+        FROM (SELECT *, ${rowMax} AS ROWMAX,
+                     MAX(${rowMax}) OVER (PARTITION BY PK_SECTION) AS SECTIONMAX
+              FROM LW_RAILWAY)
+        WHERE ROWMAX >= SECTIONMAX - ${sqlNumber(floorDb, 'railFloorDb')}
+    """ as String)
+    // CREATE TABLE AS SELECT leaves columns nullable and a primary key will not
+    // accept that. The key is not optional: the scene loader refuses a source
+    // table without an integer primary key.
+    sql.execute('ALTER TABLE LW_RAILWAY_OCT ALTER COLUMN PK SET NOT NULL')
+    sql.execute('ALTER TABLE LW_RAILWAY_OCT ADD PRIMARY KEY (PK)')
+
+    def before = sql.firstRow('SELECT COUNT(*) AS n FROM LW_RAILWAY').n
+    def after = sql.firstRow('SELECT COUNT(*) AS n FROM LW_RAILWAY_OCT').n
+    logger.info('[RAIL] sources: {} third-octave rows -> {} octave rows', before, after)
+    return 'LW_RAILWAY_OCT'
+}
+
+/**
  * Диск зоны показа в рабочей проекции. Приёмники всегда заполняют описанный
  * квадрат — Delaunay_Grid берёт от fence только envelope, — поэтому круг
  * вырезается из готовых изофон.
@@ -531,24 +694,25 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
         sql.execute('ALTER TABLE RAIL_TRAFFIC ALTER COLUMN IDTRAFFIC SET NOT NULL')
         sql.execute('ALTER TABLE RAIL_TRAFFIC ADD PRIMARY KEY (IDTRAFFIC)')
 
-        def sections = sql.firstRow('SELECT COUNT(*) AS n FROM RAIL_SECTIONS').n
-        logger.info('[RAIL] {} sections, {} trains/h day', sections, p.trainsDay)
+        logger.info('[RAIL] {} sections, {} trains/h day',
+                sql.firstRow('SELECT COUNT(*) AS n FROM RAIL_SECTIONS').n, p.trainsDay)
 
-        new Railway_Emission_from_Traffic().exec(connection, [
-                tableRailwayTraffic: 'RAIL_TRAFFIC',
-                tableRailwayTrack  : 'RAIL_SECTIONS'
-        ])
+        railEmission(connection, sql, logger)
         stamp('Railway_Emission_from_Traffic')
+
+        // LW_RAILWAY is self-contained: the emission step writes geometry
+        // alongside the per-period levels, so it goes in as the sources table
+        // rather than as a separate emission one. Not as it stands, though —
+        // see buildRailSources.
+        String railSourcesTable = buildRailSources(sql, logger, 40.0d)
+        stamp('Rail sources')
 
         sql.execute('DROP TABLE IF EXISTS ROAD_LEVEL')
         sql.execute('ALTER TABLE RECEIVERS_LEVEL RENAME TO ROAD_LEVEL')
 
-        // LW_RAILWAY is self-contained: Railway_Emission_from_Traffic writes
-        // geometry alongside third-octave levels per period (HZD*/HZE*/HZN*), so
-        // it goes in as the sources table rather than as a separate emission one.
         def railInputs = [
                 tableBuilding         : 'BUILDINGS',
-                tableSources          : 'LW_RAILWAY',
+                tableSources          : railSourcesTable,
                 tableReceivers        : 'RECEIVERS',
                 confMaxSrcDist        : p.maxSrcDist as Double,
                 confDiffVertical      : p.diffVertical as Boolean,
@@ -566,23 +730,7 @@ def exec(Connection connection, Map input, ProgressVisitor progress) {
         sql.execute('DROP TABLE IF EXISTS RAIL_LEVEL')
         sql.execute('ALTER TABLE RECEIVERS_LEVEL RENAME TO RAIL_LEVEL')
 
-        // Energetic sum, band by band. Road is the base: it covers every
-        // receiver, while a receiver out of range of any track has no rail row.
-        def bands = ['HZ63', 'HZ125', 'HZ250', 'HZ500', 'HZ1000', 'HZ2000', 'HZ4000', 'HZ8000', 'LAEQ', 'LEQ']
-        def sums = bands.collect { band ->
-            String col = sqlName(band, 'полоса')
-            "10 * LOG10(POWER(10, r.${col} / 10) + POWER(10, COALESCE(t.${col}, -99) / 10)) AS ${col}"
-        }.join(',\n                   ')
-
-        sql.execute('DROP TABLE IF EXISTS RECEIVERS_LEVEL')
-        sql.execute("""
-            CREATE TABLE RECEIVERS_LEVEL AS
-            SELECT r.IDRECEIVER, r.PERIOD, r.THE_GEOM,
-                   ${sums}
-            FROM ROAD_LEVEL r
-            LEFT JOIN RAIL_LEVEL t
-              ON r.IDRECEIVER = t.IDRECEIVER AND r.PERIOD = t.PERIOD
-        """ as String)
+        combineRoadRail(sql)
         stamp('Combine road + rail')
     }
 
