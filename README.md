@@ -1662,8 +1662,19 @@ docker compose up --build
 расчёты на карте не появятся:
 
 ```bash
-docker run --rm   -v /opt/noise-map/cache:/app/cache:ro   -v /opt/noise-map/tiles/noise:/app/tiles/noise   noise-map-noise-map:latest   node --max-old-space-size=6144 scripts/build-noise-tiles.mjs --force
+docker run --rm \
+  -v noise-map_noise-cache:/app/cache:ro \
+  -v /opt/noise-map/tiles:/app/tiles \
+  noise-map-noise-map:latest \
+  node --max-old-space-size=6144 scripts/build-noise-tiles.mjs --force
 ```
+
+Две детали, на которых легко споткнуться. Кэш — **именованный том**
+(`noise-map_noise-cache`), а не каталог рядом с проектом: подставить путь на
+хосте не выйдет, тома там нет. И `./tiles` основной сервис монтирует **только на
+чтение** — раздавать этого достаточно, а писать нет, поэтому одноразовый
+контейнер подключает тот же каталог обычным образом. Тот же приём, что и со
+сборкой глифов.
 
 Ключей передавать не нужно — их не осталось. Каталог `./tiles` подключается в
 контейнер только на чтение: тайлы пересобираются снаружи, а контейнер их
