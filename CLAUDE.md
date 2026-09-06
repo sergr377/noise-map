@@ -24,6 +24,10 @@ node scripts/check-quantize.mjs                        # cache grid idempotence
 
 node scripts/plan-tiles.mjs krasnodar                  # city-wide tile plan (Overpass only)
 
+# the noise layer: cache -> vector tile pyramid in NOISE_TILES_DIR
+node --max-old-space-size=6144 scripts/build-noise-tiles.mjs          # all four periods
+node scripts/build-noise-tiles.mjs --period DEN --dry-run             # weigh, write nothing
+
 # the basemap: vector tiles, glyphs and the style, all into TILES_DIR
 node scripts/build-tiles.mjs                           # everything missing
 node scripts/build-tiles.mjs --skip-tiles              # glyphs and style only, fast
@@ -528,6 +532,77 @@ boundaries, ranked by how many buildings each disc is the nearest to — and
   layer-wide opacity, and an opaque fill would bury the streets underneath.
   Holes between discs survive the union as interior rings, which MapLibre draws as
   holes on its own; the old engine had to be told `evenodd` for that.
+
+## The baked noise layer
+
+`scripts/build-noise-tiles.mjs` turns CACHE_DIR into a vector tile pyramid in
+`NOISE_TILES_DIR` (default `tiles/noise`), and the map draws it as a layer
+instead of opening one disc per click. Measured on a warmed Krasnodar: 269
+results, four periods, **16 445 tiles and 121 MB**, about three minutes.
+
+- **Cut every disc to its Voronoi cell, by the same rule `coveringArea` uses**
+  (`min dist/radius`). Neighbouring discs overlap by ~200 m; a fill layer has no
+  blend mode, so drawn raw they stack transparency and disagree about the band in
+  the lens. The lattice step is `√3·r`, so the cell is a regular hexagon
+  inscribed in the disc — the cut loses nothing and leaves no gap. If the drawing
+  rule and the serving rule ever diverge, the map shows one result under the
+  cursor while a click there serves another: the same class of bug as the probe
+  and POST having to agree.
+- **The overlap was measured before any of this was built.** Six adjacent pairs,
+  18 000 points, 12 901 comparable: 89.9% of points get the same band from both
+  calculations, 9.7% differ by one, 0.4% by two or more. On the line the cut
+  actually runs (0.866 of the radius) it is 92.0/7.6/0.5. That is quieter than
+  the project's own accepted trade-offs — no terrain moves 9.6% of the area a
+  band, `maxSrcDist` 350→150 moves 9.9%, and the shipped preview is 19.0% off —
+  so the mosaic is inside the noise the service already shows.
+- **The ring filter has to scale with the zoom.** A fixed threshold holds the
+  weight at z14 and up and lets z12 run to 232 KB a tile; four square pixels of
+  the target zoom brings it to 85. Densest tiles, gzip: z12 105 KB, z13 105 KB,
+  z14 66 KB, z15 32 KB, z16 12 KB.
+- **Periods are four tilesets, not one property.** Four periods in a tile is four
+  times the weight for a layer almost always read as DEN. The client switches by
+  `setTiles`, which is why the source is created from a ref rather than from the
+  `period` prop — with `period` in the effect's dependencies it would rebuild the
+  source instead of changing the URL.
+- **MVT does not make the payload zoom-independent by itself.** With a fixed
+  threshold a tile grows 1 → 14 → 53 → 145 → 232 KB from z16 to z12. Against
+  delivery by whole discs a screen costs ≈2.0 MB instead of 37 at z12 and
+  ≈1.1 instead of 2.3 at z14 — a factor of two to four, not ten. What actually
+  changed is the unit of loading: a tile is cached on its own, so panning fetches
+  a column of tiles rather than whole 750-metre discs.
+- **The isophones do not cover the plane.** Receivers are not placed inside
+  buildings and the Delaunay mesh leaves gaps: on a grid of 1802 points, 47% miss
+  when asked pixel-exact. Hence `levelAt` asks the exact point first and then a
+  six-pixel box, which recovers 86% of those misses. Do not "fix" this by filling
+  the holes at bake time — that would invent data.
+- **Tiles are not charged an `api` token.** A screen is a couple of dozen of
+  them; at sixty a minute the second pan would be refused. Measured: 80 tile
+  requests leave `RateLimit-Remaining` at 59, while 80 ordinary calls still earn
+  a 429 and a tile keeps answering 200 through it.
+- **`?v=<built>` is what makes a tile cacheable.** They are rebuilt under the
+  same names, and a stale tile spliced next to a fresh neighbour is the worst
+  kind of stale — the same reasoning that keeps `.pmtiles` on `no-cache`. The
+  stamp comes from `meta.json`, which is itself `no-cache` with an ETag.
+- **Not under `/tiles/`.** `serveTiles` calls every `.pbf` a glyph and gives it a
+  year of immutability; a glyph's code range is the same file forever, these are
+  not.
+- **The layer and a result never draw together.** Two half-transparent fills over
+  one place make the disc darker than the ground — exactly the blob the layer
+  removes. A reading, or an answer that came from the cache, means the pyramid
+  already draws that place; only a freshly computed disc is drawn on top, because
+  it is not in the pyramid until the next bake.
+- **Waiting for the layer is bounded, and not on `idle`.** `idle` is about the
+  whole map, and while the basemap streams its `.pmtiles` it can be tens of
+  seconds away — measured here at 55 s in a software-rendered browser, with the
+  data itself done in 4.3 s. `whenLayerDraws` waits for the noise source to have
+  actually painted something, with an 8 s backstop for the case where it never
+  will. Checking `isSourceLoaded` instead does not work: it is true before a
+  single tile has arrived.
+- The script deliberately does **not** import `lib.mjs` — it makes no network
+  calls, and that import installs a global `ProxyAgent`. Same reason `geo.mjs` is
+  separate. It needs room, though: one period's mosaic is ~70 MB of GeoJSON and
+  geojson-vt indexes a collection whole, so run it with
+  `node --max-old-space-size=6144`.
 
 ## The basemap is ours
 

@@ -41,3 +41,26 @@ export const BANDS: Band[] = [
 const byLevel = new Map(BANDS.map((b) => [b.level, b]));
 
 export const bandFor = (level: number): Band | undefined => byLevel.get(level);
+
+/**
+ * The same table as a style expression, for the layers whose colour cannot
+ * travel in the feature.
+ *
+ * A GeoJSON source is built here and can carry the colour on each feature; a
+ * vector tile source is built by `build-noise-tiles.mjs` and carries only
+ * ISOLVL, so its layer has to look the colour up in the style. Generated rather
+ * than written out, because a second copy of this table is exactly what the
+ * comment at the top of this file exists to prevent.
+ *
+ * The fallback is unreachable — Create_Isosurface emits levels 0..10 — and is
+ * the quiet end rather than something loud, so a level this table has never
+ * heard of cannot paint a street red.
+ */
+export function colourByLevel(): unknown[] {
+  return [
+    'match',
+    ['get', 'ISOLVL'],
+    ...BANDS.flatMap((band) => [band.level, band.color]),
+    BANDS[0]?.color ?? '#82a7ac',
+  ];
+}

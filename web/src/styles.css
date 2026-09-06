@@ -488,3 +488,24 @@ body {
   opacity: 0.4;
   cursor: default;
 }
+
+/* Точка, для которой показан уровень. Отличается от центра расчёта намеренно:
+   это ответ про место, а не центр круга, и путать их нечем. */
+.reading-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  border: 3px solid #1d2b2b;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 45%);
+}
+
+.reading {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.reading strong {
+  font-variant-numeric: tabular-nums;
+}

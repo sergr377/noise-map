@@ -10,6 +10,7 @@ import {
   ENGINE_IS_REAL,
   JOB_PARAMS,
   KILL_GRACE_MS,
+  NOISE_TILES_DIR,
   PORT,
   PROXY_URL,
   RUN_JOB_SCRIPT,
@@ -453,6 +454,86 @@ async function handlePreview(req: http.IncomingMessage, res: http.ServerResponse
   return sendScratchMap(req, res, data);
 }
 
+/**
+ * GET /api/noise/tiles/meta.json — what the baked layer covers.
+ *
+ * The client needs the zoom range and the bounds to declare a source, and the
+ * build stamp to ask for tiles by a URL that changes when they are rebuilt. A
+ * second copy of those numbers in the frontend would drift from the pyramid
+ * they describe, exactly as a hardcoded radius would drift from JOB_PARAMS.
+ */
+async function handleNoiseTileMeta(req: http.IncomingMessage, res: http.ServerResponse) {
+  const file = path.join(NOISE_TILES_DIR, 'meta.json');
+  const data = await readFile(file).catch(() => null);
+  if (!data) {
+    // Не 500: слой просто не испечён, и это рабочее состояние — карта тогда
+    // ведёт себя так же, как до его появления.
+    return sendJson(res, 404, { error: 'слой ещё не собран' });
+  }
+  const info = await stat(file).catch(() => null);
+  const etag = info ? etagFor(info) : '';
+  if (etag && req.headers['if-none-match'] === etag) {
+    res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' });
+    return res.end();
+  }
+  res.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    // Rebuilt under the same name, and it is what tells the client the tiles
+    // changed — so it is the one file in the pyramid that must not be held.
+    'Cache-Control': 'no-cache',
+    ...(etag ? { ETag: etag } : {}),
+  });
+  return res.end(data);
+}
+
+/**
+ * GET /api/noise/tiles/<period>/<z>/<x>/<y>.pbf — the baked noise layer.
+ *
+ * A directory of tiles rather than a PMTiles archive: `pmtiles` reads but does
+ * not write, and writing the format ourselves would buy nothing here — a
+ * directory needs no Range support and travels in a tar the same way the
+ * basemap travels as a file.
+ *
+ * Not served under `/tiles/` with the basemap, because `serveTiles` calls every
+ * `.pbf` a glyph and gives it a year of immutability. A glyph's code range
+ * really is the same file forever; these are rebuilt whenever the cache grows.
+ */
+async function handleNoiseTile(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  period: string,
+  z: string,
+  x: string,
+  y: string,
+) {
+  // The path is built from four matched groups rather than from the URL, so it
+  // cannot climb out of the directory the way a free-form path could.
+  const file = path.join(NOISE_TILES_DIR, period, z, x, `${y}.pbf`);
+  const data = await readFile(file).catch(() => null);
+  // A tile with nothing in it is not written at all, and MapLibre reads 404 as
+  // an empty tile. Answering with an empty body would be a lie about coverage.
+  if (!data) return sendJson(res, 404, { error: 'нет такого тайла' });
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/x-protobuf',
+    // A tile is immutable only for the build it belongs to, and `?v=` is what
+    // names that build: the client takes the stamp from meta.json, so a rebuild
+    // changes every tile URL at once. Without the parameter the same bytes have
+    // to be revalidated, because a stale tile spliced into a fresh neighbour is
+    // the worst kind of stale — the same reasoning that keeps .pmtiles on
+    // no-cache.
+    'Cache-Control': new URL(req.url ?? '/', 'http://x').searchParams.has('v')
+      ? 'public, max-age=31536000, immutable'
+      : 'no-cache',
+  };
+  if (/\bgzip\b/.test(req.headers['accept-encoding'] ?? '')) {
+    res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip' });
+    return res.end(await gzipAsync(data));
+  }
+  res.writeHead(200, headers);
+  return res.end(data);
+}
+
 /** Shared tail of the two routes above: same headers, same gzip decision. */
 async function sendScratchMap(req: http.IncomingMessage, res: http.ServerResponse, data: Buffer) {
   const headers: Record<string, string> = {
@@ -696,6 +777,9 @@ async function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, 
 /** One capture group: the job id, as the cache names it. */
 const JOB_ID = '([a-f0-9]{16})';
 
+/** A tile of the baked layer: period, then z/x/y. Also read by the limiter. */
+const NOISE_TILE_PATH = /^\/api\/noise\/tiles\/(DEN|D|E|N)\/(\d{1,2})\/(\d{1,7})\/(\d{1,7})\.pbf$/;
+
 interface RouteContext {
   req: http.IncomingMessage;
   res: http.ServerResponse;
@@ -739,6 +823,22 @@ const ROUTES: Route[] = [
     method: 'GET',
     path: /^\/api\/noise\/areas$/,
     handle: ({ res, url }) => handleAreas(res, url.searchParams),
+  },
+  // The baked layer. Anchored and disjoint from the job routes above: a job id
+  // is sixteen hex characters, so "tiles" cannot be read as one. The period is
+  // matched against the known set and z/x/y against digits, which is why the
+  // handler can join them into a path without a traversal check — nothing else
+  // is expressible.
+  {
+    method: 'GET',
+    path: /^\/api\/noise\/tiles\/meta\.json$/,
+    handle: ({ req, res }) => handleNoiseTileMeta(req, res),
+  },
+  {
+    method: 'GET',
+    path: NOISE_TILE_PATH,
+    handle: ({ req, res, params: [period = '', z = '', x = '', y = ''] }) =>
+      handleNoiseTile(req, res, period, z, x, y),
   },
   {
     method: 'GET',
@@ -812,7 +912,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     const ip = clientIp(req);
-    if (url.pathname.startsWith('/api/')) {
+    // Tiles of the baked layer are not charged a token. One screen is a couple
+    // of dozen of them, so at sixty a minute the second pan would be refused —
+    // and this is a file read off disk, exactly like the static assets below,
+    // which the limiter does not count either.
+    if (url.pathname.startsWith('/api/') && !NOISE_TILE_PATH.test(url.pathname)) {
       const verdict = take('api', ip);
       if (!verdict.ok) {
         return sendTooMany(
