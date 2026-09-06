@@ -719,6 +719,32 @@ after load routinely catches a blank map, because the panel renders long before
 the tiles do. Blank on the first frame is not a failure; blank after ten seconds
 is.
 
+### When the noise layer changes
+
+The pyramid is built from CACHE_DIR, so it has to be rebuilt after every
+prewarm — otherwise the new results simply are not on the map. Unlike the
+basemap it needs no Java, so it **can** be built on the server, off the image
+that is already there:
+
+```bash
+docker run --rm \
+  -v noise-map_noise-cache:/app/cache:ro \
+  -v /opt/noise-map/tiles:/app/tiles \
+  noise-map-noise-map:latest \
+  node --max-old-space-size=6144 scripts/build-noise-tiles.mjs --force
+```
+
+Two things that will trip you up. **The cache is a named volume**
+(`noise-map_noise-cache`), not a directory beside the project — there is no host
+path to point at. And **the service mounts `./tiles` read-only**, which is enough
+to serve and not to write, so the throwaway container mounts the same directory
+without `:ro`; the glyph build above does the same.
+
+**Bake before restarting the container**, for the same reason the basemap goes
+first: otherwise the new frontend meets visitors with no layer to draw. A failed
+bake is safe — `meta.json` is written last, and without it the client sees no
+layer and behaves exactly as it did before.
+
 ### When the basemap changes
 
 **Tiles first, container second.** The other order puts the new frontend in front
