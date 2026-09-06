@@ -18,6 +18,7 @@ node scripts/run-job.mjs --lat 55.7649 --lon 37.6055   # compute directly, no AP
 node scripts/sanity-check.mjs <geojson> DEN            # did building screening survive
 node scripts/compare-runs.mjs <a> <b> DEN              # two runs compared by band area
 node scripts/rail-probe.mjs <lat> <lon>                # what OSM knows about track nearby
+node scripts/rail-bench.mjs                            # rail propagation, timed on a synthetic scene
 
 # needs the server built first (npm run build:server):
 node scripts/check-quantize.mjs                        # cache grid idempotence
@@ -705,13 +706,62 @@ copies are kept as samples in `deploy/`. The demo answers only what is already i
 the cache, so **a deploy cannot validate the engine** — the acoustics are not
 exercised there at all.
 
-## The rail branch does not work
+## The rail branch computes, and still stays off
 
-`--rail` is off by default and is not exposed through the server. Track extraction
-and the emission step work; **the propagation pass does not finish** in reasonable
-time. Trams are impossible outright — the CNOSSOS catalogue contains none. Details
-and measurements are in the README. Do not treat this branch as working and do not
-enable it by default.
+`--rail` is off by default and is not exposed through the server. The propagation
+pass used to be the reason; it no longer is. **The reason now is the input data**,
+and no amount of pipeline work fixes it: the rolling stock is a French SNCF EMU
+standing in for an ЭД4М because the bundled catalogue holds nothing else, and the
+train count is a number the caller invents — OSM carries no timetable and, unlike
+roads, there is no official default table. Trams are impossible outright, the
+catalogue contains none. Turning the flag on would also change `JOB_PARAMS`, which
+empties the cache and the whole Krasnodar prewarm with it. Details in the README.
+
+What was fixed, and what it says about diagnosing this engine:
+
+- **The propagation finishes.** Measured on `pipeline/rail_bench.groovy`: a
+  station throat of 30 lines went from **1702.4 s to 269.6 s** (6.3×) and a plain
+  double track from 18.4 s to 5.4 s, against 4.5 s for the road pass over the
+  same geometry. The error against the exact answer is 0.03 dB on average and
+  0.06 dB at worst.
+- **Two of the three things this file used to blame were wrong.** Directivity is
+  not a cost at all — switching it off makes the pass *slower* (25.0 s against
+  18.4) because levels rise and more rays survive, and it lies by 1.5 dB on
+  average and 20 dB beside the track. Third-octaves cost only about 1.4×, and
+  collapsing them into octaves costs 0.06 dB rather than "changing how
+  directivity works". The real cost was the one nobody had counted: **six source
+  rows per track, four of which carry no energy**. A suburban EMU at 100 km/h
+  emits nothing aerodynamic (−137 dB, the fill value), is on no bridge, and its
+  traction sits 30 dB under rolling; each of those rows still bought a full share
+  of the propagation. Dropping them is worth 3× at *bit-identical* output.
+- **`Railway_Emission_from_Traffic` loses the last section of its input table.**
+  `RailWayLWIterator` emits a record only when the next key turns up, so when the
+  rows run out the accumulated one is dropped: 30 sections in, 29 out. A table of
+  exactly one section takes another branch and is unaffected, which is why this
+  hid for so long. `railEmission` appends a duplicate of the last section to be
+  eaten instead, and deletes it straight after.
+- **Both passes must stay in the same eight octaves.** The combine step sums
+  column by column and by name; while the rail pass ran in third-octaves its
+  `HZ63` meant the 63 Hz third-octave and the road's meant the octave, so the sum
+  was quietly wrong. `combineRoadRail` and `buildRailSources` are the pair that
+  holds this, and `rail_bench.groovy` exercises both.
+
+**The bench is the way to work on this**, precisely because a real rail job needs
+Overpass and tens of minutes. It builds its own scene — 130 buildings, a receiver
+mesh, track — so it needs neither, and it calls the pipeline's own
+`railEmission`, `buildRailSources` and `combineRoadRail` rather than copies, so a
+change to the pipeline shows up in the measurement:
+
+```bash
+node scripts/rail-bench.mjs                      # the default sweep
+node scripts/rail-bench.mjs --sections 30 --variants road,railProd,rail3
+```
+
+One trap it found the hard way: **`Delaunay_Grid` treats a `fence` with no SRID
+as WGS84** and reprojects it. A metric WKT then becomes an envelope millions of
+metres across and a grid of 16.7 million cells, which looks like a hang and fills
+the disk — a 10 GB database in ten minutes. Pass EWKT (`SRID=32637;POLYGON(...)`)
+or WGS84, never bare metric WKT.
 
 ## How work is done here
 
