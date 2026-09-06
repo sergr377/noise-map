@@ -767,6 +767,11 @@ or WGS84, never bare metric WKT.
 
 - **Measure, do not assert.** Any "faster" or "more accurate" is backed by numbers
   before and after; `compare-runs.mjs` and `sanity-check.mjs` exist for this.
+- **Know the noise floor before reading a difference.** The pipeline is not
+  deterministic: two runs of the *same* code differ by 0.3% of the area and
+  0.01 dB. So a `compare-runs.mjs` result under half a percent of area proves
+  nothing at all, and anything claimed below that is a coin toss dressed up as a
+  measurement.
 - **Test the premise before building.** Terrain relief was measured before the DEM
   work; the vehicle catalogue and OSM tag coverage were checked before the rail
   work. One of those two tasks was abandoned as a result.
