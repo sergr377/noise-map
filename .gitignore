@@ -35,6 +35,12 @@ logs/
 # свойство машины, а не проекта, и на каждом хосте она своя.
 docker-compose.override.yml
 
+# Личные настройки Claude Code. Каталог .claude/ теперь в git ради навыков и
+# конфигов, общих для всех, — а эти два файла свойство машины: в них попадают
+# разрешения вроде ssh на боевой сервер, и репозиторий публичный.
+.claude/settings.local.json
+.claude/settings.json
+
 # Аварийные дампы Git Bash под Windows
 *.stackdump
 
